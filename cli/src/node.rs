@@ -92,9 +92,12 @@ impl WsClient {
             ))
             .await?;
         // Default cipher and nonce are accepted in local mode only.
-        match self.api.recv().await? {
-            HostResponse::Ok | HostResponse::DelegateResponse { .. } => Ok(()),
-            other => bail!("unexpected response to RegisterDelegate: {other:?}"),
+        loop {
+            match self.api.recv().await? {
+                HostResponse::Ok | HostResponse::DelegateResponse { .. } => return Ok(()),
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                other => bail!("unexpected response to RegisterDelegate: {other:?}"),
+            }
         }
     }
 }
@@ -180,17 +183,20 @@ impl NodeClient for WsClient {
                 },
             ))
             .await?;
-        match self.api.recv().await? {
-            HostResponse::DelegateResponse { values, .. } => {
-                for msg in values {
-                    if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
-                        return Response::decode(&app.payload)
-                            .map_err(|e| anyhow!("delegate sent an undecodable reply: {e:?}"));
+        loop {
+            match self.api.recv().await? {
+                HostResponse::DelegateResponse { values, .. } => {
+                    for msg in values {
+                        if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
+                            return Response::decode(&app.payload)
+                                .map_err(|e| anyhow!("delegate sent an undecodable reply: {e:?}"));
+                        }
                     }
+                    bail!("delegate returned no application message")
                 }
-                bail!("delegate returned no application message")
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                other => bail!("unexpected response to delegate call: {other:?}"),
             }
-            other => bail!("unexpected response to delegate call: {other:?}"),
         }
     }
 }
