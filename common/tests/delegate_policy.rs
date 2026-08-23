@@ -1,6 +1,7 @@
 use chess_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
 use chess_core::delegate_policy::{
-    classify_host_entropy, decide_bind, derive_seed, BindDecision, HostEntropy,
+    classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
+    HostEntropy, SignDecision,
 };
 use chess_core::{Body, GameParams};
 use ed25519_dalek::SigningKey;
@@ -231,4 +232,134 @@ fn rebinding_the_same_label_to_the_same_game_is_idempotent() {
         panic!("expected an idempotent re-bind");
     };
     assert_eq!(record, again);
+}
+
+const OTHER_ORIGIN: [u8; 32] = [4u8; 32];
+
+fn white_record() -> GameRecord {
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    record
+}
+
+fn mv(ply: u16, uci: &str) -> Body {
+    Body::Move {
+        ply,
+        parent: [9u8; 32],
+        uci: uci.into(),
+    }
+}
+
+fn sign(record: &GameRecord, body: &Body) -> GameRecord {
+    match decide_sign(record, body, Some(ORIGIN)) {
+        SignDecision::Sign { updated } => updated,
+        other => panic!("expected a signature, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_second_different_move_at_a_signed_ply_is_refused() {
+    // The one self-inflicted loss in the protocol, made unreachable.
+    let record = sign(&white_record(), &mv(1, "e2e4"));
+    assert_eq!(record.last_signed_ply, 1);
+
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "d2d4"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::PlyAlreadySigned { ply: 1 })
+    ));
+}
+
+#[test]
+fn an_identical_move_at_a_signed_ply_is_signed_again() {
+    // A dropped response must not wedge the game. ed25519 signing is
+    // deterministic, so the record the UI gets back is byte-identical.
+    let record = sign(&white_record(), &mv(1, "e2e4"));
+    let again = sign(&record, &mv(1, "e2e4"));
+    assert_eq!(record, again, "an identical retry must not change state");
+}
+
+#[test]
+fn signing_one_body_twice_produces_byte_identical_records() {
+    // The whole retry story rests on this: ed25519-dalek signing is
+    // deterministic, so re-signing an identical body returns the same record
+    // and the peer sees no new state. If this ever stopped holding, an
+    // idempotent retry would start splitting into two records.
+    use chess_core::Record;
+    let (w, _b, params) = game();
+    let body = mv(1, "e2e4");
+    let a = Record::sign(&w, &params, body.clone());
+    let b = Record::sign(&w, &params, body);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn a_move_at_a_lower_ply_than_one_already_signed_is_refused() {
+    let mut record = sign(&white_record(), &mv(1, "e2e4"));
+    record = sign(&record, &mv(3, "g1f3"));
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "e2e4"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::PlyAlreadySigned { ply: 1 })
+    ));
+}
+
+#[test]
+fn signing_for_the_wrong_side_is_refused() {
+    // Ply 2 is Black's; this record holds White's key.
+    assert!(matches!(
+        decide_sign(&white_record(), &mv(2, "e7e5"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::WrongSide {
+            ours: Side::White,
+            ply_needs: Side::Black
+        })
+    ));
+}
+
+#[test]
+fn a_foreign_origin_is_refused() {
+    assert!(matches!(
+        decide_sign(&white_record(), &mv(1, "e2e4"), Some(OTHER_ORIGIN)),
+        SignDecision::Refuse(Refusal::ForeignOrigin)
+    ));
+}
+
+#[test]
+fn a_missing_origin_is_refused() {
+    assert!(matches!(
+        decide_sign(&white_record(), &mv(1, "e2e4"), None),
+        SignDecision::Refuse(Refusal::MissingOrigin)
+    ));
+}
+
+#[test]
+fn resign_and_draw_bodies_sign_without_touching_the_ply_counter() {
+    // These are idempotent by record id (INVARIANT 2), so there is nothing to
+    // guard: signing the same statement twice collapses to one slot on merge.
+    let record = sign(&white_record(), &mv(1, "e2e4"));
+    for body in [
+        Body::Resign,
+        Body::DrawOffer { at: [1u8; 32] },
+        Body::DrawAccept { offer: [2u8; 32] },
+    ] {
+        let after = sign(&record, &body);
+        assert_eq!(after.last_signed_ply, record.last_signed_ply);
+        assert_eq!(after.last_move_body_hash, record.last_move_body_hash);
+    }
+}
+
+#[test]
+fn advancing_plies_updates_the_counter() {
+    let mut record = white_record();
+    for ply in [1u16, 3, 5, 7] {
+        record = sign(&record, &mv(ply, "e2e4"));
+        assert_eq!(record.last_signed_ply, ply);
+    }
 }

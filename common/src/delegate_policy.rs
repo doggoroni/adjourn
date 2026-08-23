@@ -5,7 +5,7 @@
 //! itself cannot even be compiled on a Windows host.
 
 use crate::delegate_api::{EntropyQuality, Refusal, Side};
-use crate::types::{Body, GameParams, KeyBytes};
+use crate::types::{color_at_ply, Body, GameParams, KeyBytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -155,6 +155,65 @@ pub fn decide_bind(
             contract,
             last_signed_ply: 0,
             last_move_body_hash: [0u8; 32],
+        },
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignDecision {
+    /// Sign the body and persist `updated`. For an identical retry `updated`
+    /// equals the record passed in, so persisting it is a no-op — that keeps
+    /// one case out of this API.
+    Sign {
+        updated: GameRecord,
+    },
+    Refuse(Refusal),
+}
+
+/// Decide whether to sign, using only what the delegate itself has recorded.
+///
+/// Nothing here trusts the caller's view of the game. That is deliberate: the
+/// caller may be replaying a stale position, and the ply counter is what makes
+/// that harmless.
+pub fn decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8; 32]>) -> SignDecision {
+    let Some(origin) = origin else {
+        return SignDecision::Refuse(Refusal::MissingOrigin);
+    };
+    if origin != record.origin {
+        return SignDecision::Refuse(Refusal::ForeignOrigin);
+    }
+
+    match body {
+        Body::Move { ply, .. } => {
+            let needs: Side = color_at_ply(*ply).into();
+            if needs != record.side {
+                return SignDecision::Refuse(Refusal::WrongSide {
+                    ours: record.side,
+                    ply_needs: needs,
+                });
+            }
+            if *ply < record.last_signed_ply {
+                return SignDecision::Refuse(Refusal::PlyAlreadySigned { ply: *ply });
+            }
+            if *ply == record.last_signed_ply {
+                // Only an identical retry may pass. A DIFFERENT move at a ply
+                // already signed is the double-sign fraud proof: signing it
+                // would forfeit us.
+                if record.last_signed_ply != 0 && body_hash(body) == record.last_move_body_hash {
+                    return SignDecision::Sign {
+                        updated: record.clone(),
+                    };
+                }
+                return SignDecision::Refuse(Refusal::PlyAlreadySigned { ply: *ply });
+            }
+            let mut updated = record.clone();
+            updated.last_signed_ply = *ply;
+            updated.last_move_body_hash = body_hash(body);
+            SignDecision::Sign { updated }
+        }
+        // Idempotent by record id, so no guard is needed.
+        Body::Resign | Body::DrawOffer { .. } | Body::DrawAccept { .. } => SignDecision::Sign {
+            updated: record.clone(),
         },
     }
 }
