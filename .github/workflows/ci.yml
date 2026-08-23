@@ -17,12 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No toolchain input: rust-toolchain.toml is the single source of truth.
-      # Naming a version here as well would let the two drift apart.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: none
-      - run: rustup show active-toolchain
+      # No toolchain action on purpose. rust-toolchain.toml is the single
+      # source of truth, and rustup (pre-installed on the runner) honours it,
+      # installing the pinned version plus its declared targets and components
+      # on first invocation. Naming a version here as well would let the two
+      # drift apart -- and the contract key depends on the exact rustc version.
+      - name: Install the pinned toolchain
+        run: rustup show
 
       - uses: Swatinem/rust-cache@v2
 
@@ -112,9 +113,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: none
+      - name: Install the pinned toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Assert common has no Freenet dependency
         run: |
