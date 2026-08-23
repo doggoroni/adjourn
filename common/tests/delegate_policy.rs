@@ -1,4 +1,5 @@
-use chess_core::delegate_api::{Refusal, Request, Response, Side};
+use chess_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
+use chess_core::delegate_policy::{classify_host_entropy, derive_seed, HostEntropy};
 use chess_core::Body;
 
 #[test]
@@ -31,4 +32,77 @@ fn malformed_bytes_decode_to_a_refusal_not_a_panic() {
         Request::decode(&[0xff, 0xff, 0xff]),
         Err(Refusal::Malformed(_))
     ));
+}
+
+#[test]
+fn all_zero_host_entropy_is_dead() {
+    // This is exactly what the off-wasm stub returns.
+    assert!(matches!(
+        classify_host_entropy([0u8; 32], [0u8; 32]),
+        HostEntropy::Dead
+    ));
+}
+
+#[test]
+fn two_identical_draws_mean_the_source_is_dead() {
+    // A live CSPRNG repeats 32 bytes with negligible probability.
+    assert!(matches!(
+        classify_host_entropy([5u8; 32], [5u8; 32]),
+        HostEntropy::Dead
+    ));
+}
+
+#[test]
+fn two_different_draws_are_live() {
+    let mut second = [5u8; 32];
+    second[0] = 6;
+    assert!(matches!(
+        classify_host_entropy([5u8; 32], second),
+        HostEntropy::Live(_)
+    ));
+}
+
+#[test]
+fn dead_host_and_no_caller_entropy_fails_closed() {
+    assert_eq!(
+        derive_seed(HostEntropy::Dead, None, "g1").unwrap_err(),
+        Refusal::NoEntropy
+    );
+}
+
+#[test]
+fn all_zero_caller_entropy_counts_as_absent() {
+    assert_eq!(
+        derive_seed(HostEntropy::Dead, Some([0u8; 32]), "g1").unwrap_err(),
+        Refusal::NoEntropy
+    );
+}
+
+#[test]
+fn dead_host_with_caller_entropy_is_degraded_not_fatal() {
+    let (seed, quality) = derive_seed(HostEntropy::Dead, Some([1u8; 32]), "g1").expect("seed");
+    assert_eq!(quality, EntropyQuality::Degraded);
+    assert_ne!(seed, [0u8; 32]);
+}
+
+#[test]
+fn live_host_is_host_backed() {
+    let (_, quality) = derive_seed(HostEntropy::Live([2u8; 32]), None, "g1").expect("seed");
+    assert_eq!(quality, EntropyQuality::HostBacked);
+}
+
+#[test]
+fn seeds_are_deterministic_and_label_separated() {
+    let a = derive_seed(HostEntropy::Live([2u8; 32]), Some([1u8; 32]), "g1").unwrap();
+    let b = derive_seed(HostEntropy::Live([2u8; 32]), Some([1u8; 32]), "g1").unwrap();
+    let c = derive_seed(HostEntropy::Live([2u8; 32]), Some([1u8; 32]), "g2").unwrap();
+    assert_eq!(a.0, b.0, "derivation must be deterministic in its inputs");
+    assert_ne!(a.0, c.0, "a different label must give a different key");
+}
+
+#[test]
+fn caller_entropy_changes_the_seed_even_with_the_same_host_draw() {
+    let a = derive_seed(HostEntropy::Live([2u8; 32]), Some([1u8; 32]), "g1").unwrap();
+    let b = derive_seed(HostEntropy::Live([2u8; 32]), Some([9u8; 32]), "g1").unwrap();
+    assert_ne!(a.0, b.0, "caller entropy must be mixed in, not ignored");
 }
