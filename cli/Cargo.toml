@@ -27,3 +27,6 @@ tokio-tungstenite.workspace = true
 anyhow.workspace = true
 ed25519-dalek.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
