@@ -2,6 +2,7 @@
 //!
 //! No Freenet dependencies — the consistency model is testable standalone.
 
+pub mod delegate_api;
 pub mod project;
 pub mod state;
 pub mod types;
