@@ -545,3 +545,21 @@ fn advancing_plies_updates_the_counter() {
         assert_eq!(record.last_signed_ply, ply);
     }
 }
+
+/// GameRecord is the delegate's persistence format: it lives in the secret
+/// store and carries last_signed_ply, the double-sign guard. Nothing else
+/// tests that it survives a round trip, and `origin` just changed shape.
+#[test]
+fn a_game_record_round_trips_through_cbor() {
+    for record in [white_record(), cli_record()] {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&record, &mut buf).expect("encode");
+        let back: GameRecord = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(back, record, "GameRecord did not survive CBOR");
+        assert_eq!(back.origin, record.origin, "origin lost its value");
+        assert_eq!(
+            back.last_signed_ply, record.last_signed_ply,
+            "the double-sign guard did not survive"
+        );
+    }
+}
