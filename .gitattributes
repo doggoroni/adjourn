@@ -1,0 +1,3 @@
+# Shell scripts must keep LF endings: scripts/build-*.sh run on ubuntu in CI,
+# and a CRLF shebang line fails with "bad interpreter".
+*.sh text eol=lf

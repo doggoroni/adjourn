@@ -1,0 +1,19 @@
+[package]
+name = "chess-core"
+version.workspace = true
+edition.workspace = true
+
+# No Freenet dependencies, deliberately. The consistency model is testable
+# standalone, so the algebra tests run without a contract runtime.
+[dependencies]
+shakmaty.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+
+[dev-dependencies]
+# `hazmat` lets the adversarial tests forge a SECOND VALID signature over the
+# same message, which is what a malicious player with a custom signer can do.
+# Dev-only: it never reaches the contract build.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "hazmat"] }

@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings: an unused dependency is a dependency that can still
+  # change the emitted WASM bytes, and therefore the contract key.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No toolchain input: rust-toolchain.toml is the single source of truth.
+      # Naming a version here as well would let the two drift apart.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: none
+      - run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--locked` everywhere. Without it a transitive patch release can enter
+      # the build, change the WASM bytes, and rotate the contract key.
+      - name: Verify Cargo.lock is committed and current
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # The canonical contract build. ubuntu-latest is the reference platform:
+      # `--remap-path-prefix` removes the machine-specific prefixes, but the
+      # path SEPARATOR style still differs between Windows and Linux, so the
+      # bytes — and therefore the contract key — are only comparable within one
+      # OS. Local Windows/macOS builds are for development only.
+      #
+      # The script also fails if a build path leaked into the WASM, and asserts
+      # the wasm32 target builds at all: wasmtime has no getrandom backend on
+      # wasm32-unknown-unknown, so a graph containing it produces wasm-bindgen
+      # placeholder imports that cannot be resolved. See freenet/river#241.
+      - name: Build contract WASM (canonical)
+        run: ./scripts/build-contract.sh
+
+      - name: Assert no getrandom in the contract graph
+        run: |
+          if cargo tree -p chess-contract --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
+            echo "getrandom reached the contract dependency graph; the WASM will not instantiate under wasmtime"
+            exit 1
+          fi
+
+      # A rebuild from clean must produce the same bytes, or the contract key is
+      # not a property of the commit.
+      - name: Assert the build is reproducible
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/chess_contract.wasm
+          FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
+          cargo clean
+          ./scripts/build-contract.sh > /dev/null
+          SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
+          echo "first:  $FIRST"
+          echo "second: $SECOND"
+          if [ "$FIRST" != "$SECOND" ]; then
+            echo "contract WASM is not reproducible; the contract key would be unstable"
+            exit 1
+          fi
+
+  # The point of keeping `common` free of Freenet dependencies: the algebra is
+  # verifiable on its own, with no contract runtime in the picture.
+  algebra-standalone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert common has no Freenet dependency
+        run: |
+          if cargo tree -p chess-core --locked | grep -Ei 'freenet'; then
+            echo "chess-core must stay free of Freenet dependencies"
+            exit 1
+          fi
+      - run: cargo test -p chess-core --locked

@@ -1,0 +1,32 @@
+[package]
+name = "chess-contract"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chess-core.workspace = true
+freenet-stdlib.workspace = true
+ciborium.workspace = true
+serde.workspace = true
+
+# NOTE: do NOT add `rand` or `getrandom` here, directly or transitively. The
+# contract WASM runs in wasmtime, which has no `getrandom` backend on
+# wasm32-unknown-unknown; pulling those crates in produces wasm-bindgen
+# placeholder imports that wasmtime cannot resolve. Contracts must be pure
+# anyway — they are deterministic state transitions.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["contract", "freenet-main-contract"]
+contract = ["freenet-stdlib/contract"]
+# The `#[contract]` macro expands to code gated on this cfg; without the
+# feature declared, the generated exports are compiled out and the WASM has no
+# entry points. River declares it for the same reason.
+freenet-main-contract = []
+
+[dev-dependencies]
+# Tests build signed records, so they need the signing half of ed25519. This is
+# dev-only and never enters the contract WASM.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }

@@ -1,0 +1,9 @@
+/target
+
+# Vendored reference checkouts (cloned upstream repos, read-only reference).
+# They carry their own .git; committing them would embed foreign repositories.
+/river
+/freenet-scaffold
+
+# Subagent-driven-development scratch workspace.
+/.superpowers

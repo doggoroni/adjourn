@@ -1,0 +1,51 @@
+[workspace]
+members = ["common", "contracts/chess-contract"]
+resolver = "2"
+
+# Vendored reference checkouts, not part of this build.
+exclude = ["river", "freenet-scaffold"]
+
+# Exact pins, not ranges.
+#
+# The contract key is the hash of the compiled WASM. A caret range lets a
+# `cargo update` pull a new patch release, which changes the emitted bytes and
+# silently rotates the app's address — every existing game becomes unreachable.
+# Pin exactly, commit `Cargo.lock`, and build `--locked`.
+[workspace.dependencies]
+shakmaty = "=0.30.1"
+# `default-features = false` and no `rand_core`: the contract only ever
+# VERIFIES signatures. Pulling in an RNG would put `getrandom` in the graph,
+# which on wasm32-unknown-unknown emits wasm-bindgen placeholder imports that
+# wasmtime cannot resolve — the contract would fail to instantiate.
+# See the equivalent warnings in river/Cargo.toml (freenet/river#241).
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+ciborium = "=0.2.2"
+freenet-stdlib = { version = "=0.8.5", features = ["contract"] }
+chess-core = { path = "common" }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 'z'   # contracts are shipped as WASM; size is the cost that matters
+lto = true
+codegen-units = 1 # deterministic codegen: parallel units can reorder output
+panic = 'abort'
+strip = true
+
+# NOTE: the WASM embeds absolute build paths — the checkout directory and
+# `$HOME/.cargo/registry` — through panic locations. Two developers building the
+# same commit with the same pinned toolchain would otherwise produce different
+# bytes and therefore DIFFERENT CONTRACT KEYS, which is exactly the failure this
+# pinning exists to prevent.
+#
+# The fix is `--remap-path-prefix`, applied by `scripts/build-contract.sh`.
+# Cargo's `trim-paths` profile option would be tidier but is still unstable in
+# 1.97.1 and would force a nightly toolchain on the contract build.
+# Build the contract ONLY through that script.
+
+[profile.release.package."*"]
+opt-level = 'z'

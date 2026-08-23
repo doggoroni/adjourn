@@ -1,0 +1,19 @@
+# Pinned to keep chess_contract.wasm deterministic.
+#
+# Why this matters: the contract key is the hash of the compiled WASM. A
+# different rustc version emits different bytes and therefore a different
+# contract key — every in-progress game becomes unreachable, with no migration
+# path, because the address players hold is derived from the old bytes.
+#
+# When updating this pin:
+#   1. Rebuild the WASM and record the new contract key BEFORE changing it
+#   2. Decide the migration story for games already on the network
+#   3. Bump the channel and commit `Cargo.lock` in the same change
+#
+# See https://freenet.org/build/manual/upgrading-contracts/ — River derives its
+# key as blake3(code_hash ‖ owner_key) so invite links survive upgrades. Worth
+# copying that pattern if game URLs ever need to outlive a contract version.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
