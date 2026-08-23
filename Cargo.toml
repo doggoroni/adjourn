@@ -33,6 +33,7 @@ edition = "2021"
 # freenet-stdlib, so LGPL obligations attach to the published binaries whatever
 # this project's own source licence says.
 license = "LGPL-3.0-only"
+repository = "https://github.com/doggoroni/freenet-chess"
 
 [profile.release]
 opt-level = 'z'   # contracts are shipped as WASM; size is the cost that matters
