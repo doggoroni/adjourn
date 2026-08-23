@@ -119,6 +119,34 @@ These look like bugs. They are not.
    `stale_draw_offer_is_ignored`, `draw_offer_at_the_current_head_is_accepted`,
    `accepting_and_then_moving_voids_your_own_acceptance`.
 
+## Wire format
+
+Everything here feeds `Record::id()` and the signing payload, so **any change
+rotates every id and invalidates every signature**. Treat this table as frozen
+once a game exists on the network.
+
+| Rust | wire key |
+|---|---|
+| `Record.body` / `.signer` / `.sig` | `b` / `k` / `s` |
+| `Body::Move` / `Resign` / `DrawOffer` / `DrawAccept` | `m` / `r` / `o` / `a` |
+| `Move.ply` / `.parent` / `.uci` | `p` / `t` / `u` |
+| `DrawOffer.at` | `t` |
+| `DrawAccept.offer` | `o` |
+
+`GameState` is a **sequence** of records, not a map — the id is recomputed on
+decode. Decode **rejects duplicate ids**: an honestly-serialized state cannot
+contain them (map keys are unique), so a duplicate means crafted bytes, and
+`decode` has no `params` with which to tell an honest signature from a forgery.
+Refusing beats guessing.
+
+`Summary` is one packed byte string of 64-byte `id ‖ digest` entries in id
+order. A payload that is not a whole number of entries, or that repeats an id,
+is refused.
+
+Byte fields carry `#[serde(with = "serde_bytes")]` so CBOR emits byte strings
+rather than arrays of integers. A `[u8; 32]` costs 34 bytes with it and ~55
+without.
+
 ## Anti-goals for v1
 
 Do not add: timers or clocks (self-reported timestamps are unenforceable —
@@ -171,19 +199,19 @@ pure function of the result set.
 - **`Status.ignored` is imprecise** — it's `len - chain.len()`, so it counts
   resign/draw records as "ignored".
 
-- **CBOR encoding, partially fixed.** `serde_bytes` on every byte field took a
-  7-record game from 2494 to 1706 bytes (356 -> 244 per record). Measured, not
-  estimated: the old "roughly halves it" guess was optimistic.
+- **CBOR encoding: done.** A 7-record game is 1100 bytes (157 a record), down
+  from 2494 (356). Three changes got there, all breaking, all landed in one
+  pre-1.0 pass:
+  `serde_bytes` on every byte field; `GameState` encoding as a bare *sequence*
+  (the map key was `rec.id()`, derivable, 34 bytes a record of pure
+  duplication); and short `#[serde(rename)]` wire keys on `Record`/`Body`.
+  `Summary` — which rides on EVERY sync round — is now a newtype packing to
+  exactly 64 bytes an entry (`id ‖ digest`) instead of ~110.
 
-  Two sources of bloat remain, each worth roughly what serde_bytes was:
-  the `BTreeMap` key repeats the 32-byte record id, which is already derivable
-  from the record via `rec.id()` (~55 bytes/record, fixable by serialising
-  `GameState` as an ordered list and rebuilding the map on decode); and serde
-  writes struct field names as CBOR strings (`body`, `signer`, `parent`, ...).
-
-  Both are still **breaking**: `body_bytes` feeds `Record::id()` AND the
-  signing payload, so either rotates every id and invalidates every signature.
-  Do them together, before launch, or not at all.
+  `GameParams` and the delegate API types are deliberately left readable: the
+  line is *rename what repeats per record on the wire; leave one-off and local
+  types legible*. Params are 104 bytes once per contract, and that is the thing
+  you squint at when debugging a contract key.
 
 - **`make_move` round-trips through FEN** to re-derive the position, which
   loses history. Now that `walk` tracks repetitions, this also means

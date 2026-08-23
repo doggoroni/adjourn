@@ -89,7 +89,8 @@ Build the contract **only** through that script: it applies the
   draw offers, promotion and underpromotion, castling notation, en passant,
   fivefold repetition
 
-Full-game state is ~1.7 KB / 7 records for a 7-ply game (~244 bytes per move).
+Full-game state is ~1.1 KB / 7 records for a 7-ply game (~157 bytes per move),
+and a sync summary is exactly 64 bytes per record.
 
 ## Next
 
@@ -105,17 +106,11 @@ Deferred by design: timers, matchmaking, ratings.
 The wire format is **not frozen**. Two changes still pending will rotate every
 identifier in the system:
 
-- **Two further encoding wins remain.** `serde_bytes` (done) took the state
-  from 2494 to 1706 bytes. What is left is the `BTreeMap` key, which repeats
-  the 32-byte id already derivable from the record via `rec.id()` (~55 bytes a
-  record), and serde's struct field names, which CBOR writes out as strings
-  ("body", "signer", "parent"...). Either change rotates every record id
-  again, because `body_bytes` feeds both `Record::id()` and the signing
-  payload.
-- **Contract-key coupling.** `adjourn-core` currently compiles into the contract
-  WASM whether or not the contract uses it, so adding delegate code rotates the
-  *contract* key. Until that is feature-gated, any `adjourn-core` change moves the
-  app's address.
+- **The wire format is now frozen-ish but unversioned.** The encoding pass is
+  done (state 2494 -> 1100 bytes, summary ~110 -> 64 per record), and
+  `fdev conformance` reports 403/403 cases held. But there is no format version
+  field, so any future change is still a hard break rather than a negotiated
+  one.
 
 Treat published contract keys as ephemeral until this section says otherwise.
 

@@ -84,34 +84,41 @@ pub fn color_at_ply(ply: u16) -> Color {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     /// A half-move. `parent` is the id of the ply-1 record (or genesis at ply 1).
+    #[serde(rename = "m")]
     Move {
+        #[serde(rename = "p")]
         ply: u16,
-        #[serde(with = "serde_bytes")]
+        #[serde(rename = "t", with = "serde_bytes")]
         parent: RecordId,
+        #[serde(rename = "u")]
         uci: String,
     },
     /// Unconditional. Position-independent, so it needs no anchor.
+    #[serde(rename = "r")]
     Resign,
     /// A draw offer anchored to a specific head, so it expires implicitly
     /// once the game moves on.
+    #[serde(rename = "o")]
     DrawOffer {
-        #[serde(with = "serde_bytes")]
+        #[serde(rename = "t", with = "serde_bytes")]
         at: RecordId,
     },
     /// Accepts a specific offer by record id.
+    #[serde(rename = "a")]
     DrawAccept {
-        #[serde(with = "serde_bytes")]
+        #[serde(rename = "o", with = "serde_bytes")]
         offer: RecordId,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(rename = "b")]
     pub body: Body,
-    #[serde(with = "serde_bytes")]
+    #[serde(rename = "k", with = "serde_bytes")]
     pub signer: KeyBytes,
     /// 64 raw ed25519 bytes.
-    #[serde(with = "serde_bytes")]
+    #[serde(rename = "s", with = "serde_bytes")]
     pub sig: Vec<u8>,
 }
 

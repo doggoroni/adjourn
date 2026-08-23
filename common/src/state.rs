@@ -10,12 +10,47 @@ use crate::types::{GameParams, Record, RecordId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GameState {
     /// BTreeMap, not HashMap: canonical iteration order gives byte-identical
     /// serialization on every peer holding the same logical state.
     pub records: BTreeMap<RecordId, Record>,
 }
+
+/// On the wire a state is a bare sequence of records, NOT a map.
+///
+/// The map key is `rec.id()`, which is derived from the record itself, so
+/// sending it costs 34 bytes a record to transmit something the receiver can
+/// compute. `BTreeMap` iteration is in id order, so the sequence is still
+/// canonical — invariant 5 is about byte-identical output across peers, and
+/// that holds.
+impl Serialize for GameState {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.records.values())
+    }
+}
+
+impl<'de> Deserialize<'de> for GameState {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let records = Vec::<Record>::deserialize(d)?;
+        let mut out = BTreeMap::new();
+        for rec in records {
+            // An honestly-serialized state cannot repeat an id: map keys are
+            // unique. Duplicates therefore mean crafted bytes — and decoding
+            // has no `params`, so it cannot tell an honest signature from a
+            // forgery. Refuse rather than silently pick a winner.
+            if out.insert(rec.id(), rec).is_some() {
+                return Err(serde::de::Error::custom(
+                    "two records share one id; state is malformed",
+                ));
+            }
+        }
+        Ok(GameState { records: out })
+    }
+}
+
+/// SHA-256 of a record's signature bytes; see [`Record::sig_digest`].
+pub type SigDigest = [u8; 32];
 
 /// Compact representation of what a peer holds. Exact, not probabilistic —
 /// no Bloom filter false positives to design a second sync round around.
@@ -25,10 +60,72 @@ pub struct GameState {
 /// hold different bytes under the same id and a set-of-ids summary would report
 /// them as already in sync. Carrying the digest is what keeps whitepaper
 /// Property 1 (sync soundness) true in the collision case.
-pub type Summary = BTreeMap<RecordId, SigDigest>;
+///
+/// A newtype rather than a `BTreeMap` alias so it can carry its own encoding:
+/// see the `Serialize` impl. Derefs to the map, so reads are unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary(BTreeMap<RecordId, SigDigest>);
 
-/// SHA-256 of a record's signature bytes; see [`Record::sig_digest`].
-pub type SigDigest = [u8; 32];
+impl Summary {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, id: RecordId, digest: SigDigest) -> Option<SigDigest> {
+        self.0.insert(id, digest)
+    }
+}
+
+impl std::ops::Deref for Summary {
+    type Target = BTreeMap<RecordId, SigDigest>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl FromIterator<(RecordId, SigDigest)> for Summary {
+    fn from_iter<I: IntoIterator<Item = (RecordId, SigDigest)>>(iter: I) -> Self {
+        Summary(iter.into_iter().collect())
+    }
+}
+
+/// The summary rides on EVERY sync round, so its encoding matters more than
+/// the state's. As a plain map of two `[u8; 32]`s, serde emits both halves as
+/// CBOR arrays of integers — about 110 bytes to carry 64 bytes of content.
+///
+/// Packed as one byte string of `id ‖ digest` entries in id order it is
+/// exactly 64 bytes an entry, and still canonical: `BTreeMap` iterates sorted.
+impl Serialize for Summary {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut buf = Vec::with_capacity(self.0.len() * 64);
+        for (id, digest) in &self.0 {
+            buf.extend_from_slice(id);
+            buf.extend_from_slice(digest);
+        }
+        s.serialize_bytes(&buf)
+    }
+}
+
+impl<'de> Deserialize<'de> for Summary {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let buf = serde_bytes::ByteBuf::deserialize(d)?;
+        let buf: &[u8] = buf.as_ref();
+        if !buf.len().is_multiple_of(64) {
+            return Err(serde::de::Error::custom(
+                "summary is not a whole number of 64-byte entries",
+            ));
+        }
+        let mut out = BTreeMap::new();
+        for chunk in buf.chunks_exact(64) {
+            let id: RecordId = chunk[..32].try_into().expect("32 bytes");
+            let digest: SigDigest = chunk[32..].try_into().expect("32 bytes");
+            if out.insert(id, digest).is_some() {
+                return Err(serde::de::Error::custom("summary repeats a record id"));
+            }
+        }
+        Ok(Summary(out))
+    }
+}
 
 /// The records the other peer is missing.
 pub type Delta = Vec<Record>;

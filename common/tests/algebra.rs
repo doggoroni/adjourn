@@ -429,6 +429,104 @@ fn signature_malleability_does_not_split_records() {
     assert!(payload.starts_with(b"adjourn-v1/sig"));
 }
 
+/// The summary goes out on EVERY sync round, so its encoding matters more
+/// than the state's. As a plain `BTreeMap<[u8;32],[u8;32]>` both halves encode
+/// as CBOR arrays of integers -- about 110 bytes an entry to carry 64 bytes.
+/// Packed, it is exactly 64 bytes an entry plus one small header.
+#[test]
+fn summary_packs_to_64_bytes_per_entry() {
+    let (full, _params, _, _) = play(SCHOLARS);
+    let summary = full.summarize();
+    assert_eq!(summary.len(), 7);
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&summary, &mut bytes).expect("encode");
+
+    // One CBOR byte-string header (0x58 + length for 448 bytes) then the payload.
+    assert!(
+        bytes.len() <= 7 * 64 + 4,
+        "summary should pack to ~448 bytes, got {}",
+        bytes.len()
+    );
+
+    let back: Summary = ciborium::from_reader(bytes.as_slice()).expect("decode");
+    assert_eq!(back, summary, "summary did not round-trip");
+}
+
+/// A truncated or misaligned summary must be refused, not silently truncated.
+#[test]
+fn summary_rejects_a_misaligned_payload() {
+    let (full, _params, _, _) = play(&["e2e4"]);
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&full.summarize(), &mut bytes).expect("encode");
+    // Drop one byte from the payload so it is no longer a multiple of 64.
+    let mut broken = Vec::new();
+    ciborium::into_writer(&serde_bytes::ByteBuf::from(vec![0u8; 63]), &mut broken).expect("encode");
+    assert!(
+        ciborium::from_reader::<Summary, _>(broken.as_slice()).is_err(),
+        "a 63-byte payload is not a whole number of entries and must be refused"
+    );
+    // Control: the real thing still decodes.
+    assert!(ciborium::from_reader::<Summary, _>(bytes.as_slice()).is_ok());
+}
+
+/// The `BTreeMap` key is `rec.id()` -- derivable from the record itself, so
+/// putting it on the wire is 34 bytes per record of pure duplication.
+#[test]
+fn state_encodes_as_a_bare_sequence_of_records() {
+    let (full, _params, _, _) = play(SCHOLARS);
+    let bytes = full.encode();
+    // A CBOR array header for 7 items is 0x87; a 7-entry map would be 0xa7.
+    assert_eq!(
+        bytes[0], 0x87,
+        "expected a 7-element CBOR array, got first byte 0x{:02x}",
+        bytes[0]
+    );
+}
+
+/// An honestly-serialised state cannot contain two records with the same id --
+/// map keys are unique. So duplicates mean crafted bytes, and `decode` has no
+/// `params` with which to tell an honest signature from a forgery. Refuse
+/// rather than silently pick one.
+#[test]
+fn decode_rejects_duplicate_record_ids() {
+    let (w, _b, params) = keys();
+    let body = Body::Move {
+        ply: 1,
+        parent: params.genesis(),
+        uci: "e2e4".into(),
+    };
+    let rec = Record::sign(&w, &params, body.clone());
+    let alt = second_valid_signature(&w, &params, &body);
+    assert_eq!(rec.id(), alt.id());
+
+    // Control: two DISTINCT records in a bare sequence must decode fine.
+    // Without this the test could pass merely because the shape is wrong.
+    let other = Record::sign(
+        &w,
+        &params,
+        Body::Move {
+            ply: 1,
+            parent: params.genesis(),
+            uci: "d2d4".into(),
+        },
+    );
+    let mut ok_bytes = Vec::new();
+    ciborium::into_writer(&vec![rec.clone(), other], &mut ok_bytes).expect("encode");
+    assert!(
+        GameState::decode(&ok_bytes).is_some(),
+        "control failed: a well-formed two-record sequence must decode"
+    );
+
+    // Two records, same id, both in the sequence.
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&vec![rec, alt], &mut bytes).expect("encode");
+    assert!(
+        GameState::decode(&bytes).is_none(),
+        "decode accepted a state carrying two records under one id"
+    );
+}
+
 #[test]
 fn round_trips_through_cbor() {
     let (full, params, _, _) = play(SCHOLARS);
