@@ -1,7 +1,7 @@
 use adjourn_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
-    HostEntropy, SignDecision,
+    HostEntropy, SignDecision, GAME_RECORD_FORMAT,
 };
 use adjourn_core::{Body, GameParams};
 use ed25519_dalek::SigningKey;
@@ -288,6 +288,70 @@ fn sign(record: &GameRecord, body: &Body) -> GameRecord {
         SignDecision::Sign { updated } => updated,
         other => panic!("expected a signature, got {other:?}"),
     }
+}
+
+/// The delegate's secrets OUTLIVE the delegate. `RegisterDelegate` carries a
+/// `predecessors` list and the node copies LOCAL-scope secrets forward into a
+/// new delegate's namespace, so a future delegate will read records this one
+/// wrote.
+///
+/// The danger is not a decode error -- it is a decode SUCCESS. Add a
+/// `#[serde(default)]` field in some later version and serde will happily
+/// deserialize an old record with `last_signed_ply` defaulted to 0, silently
+/// resetting the double-sign guard on a real in-progress game. So the format
+/// is checked explicitly, before any other field is trusted.
+#[test]
+fn a_record_from_another_format_cannot_be_signed_against() {
+    let mut record = white_record();
+    record.format = GAME_RECORD_FORMAT + 1;
+
+    match decide_sign(&record, &mv(1, "e2e4"), Some(ORIGIN)) {
+        SignDecision::Refuse(Refusal::StaleRecordFormat { found, expected }) => {
+            assert_eq!(found, GAME_RECORD_FORMAT + 1);
+            assert_eq!(expected, GAME_RECORD_FORMAT);
+        }
+        other => panic!("expected a format refusal, got {other:?}"),
+    }
+}
+
+/// The format check must run BEFORE the origin check: if we cannot trust the
+/// record's layout we cannot trust the origin field inside it either.
+#[test]
+fn the_format_check_precedes_every_other_check() {
+    let mut record = white_record();
+    record.format = GAME_RECORD_FORMAT + 1;
+
+    // No origin at all, and a wrong-side ply. Both would normally refuse with
+    // their own reason; format must win.
+    assert!(matches!(
+        decide_sign(&record, &mv(2, "e7e5"), None),
+        SignDecision::Refuse(Refusal::StaleRecordFormat { .. })
+    ));
+}
+
+#[test]
+fn a_record_from_another_format_cannot_be_rebound() {
+    let (w, _b, params) = game();
+    let mut existing = white_record();
+    existing.format = GAME_RECORD_FORMAT + 1;
+
+    assert!(matches!(
+        decide_bind(
+            Some(&existing),
+            "g1",
+            w.verifying_key().to_bytes(),
+            &params,
+            CONTRACT,
+            EntropyQuality::HostBacked,
+            Some(ORIGIN)
+        ),
+        BindDecision::Refuse(Refusal::StaleRecordFormat { .. })
+    ));
+}
+
+#[test]
+fn binding_stamps_the_current_format() {
+    assert_eq!(white_record().format, GAME_RECORD_FORMAT);
 }
 
 #[test]

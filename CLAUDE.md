@@ -119,6 +119,29 @@ These look like bugs. They are not.
    `stale_draw_offer_is_ignored`, `draw_offer_at_the_current_head_is_accepted`,
    `accepting_and_then_moving_voids_your_own_acceptance`.
 
+## Persisted-record versioning
+
+The network encoding needs no version field: the contract key is
+`hash(code, params)` and the encoding lives in that code, so two peers syncing
+one contract instance are running byte-identical WASM by construction and
+cannot disagree about the format. A version prefix there would cost bytes on
+every message to detect a mismatch that cannot occur.
+
+The delegate's secret store is the opposite case. `RegisterDelegate` carries a
+`predecessors` list and the node copies LOCAL-scope secrets forward into the new
+generation's namespace, so a future delegate **will** read records this one
+wrote. `GameRecord` therefore carries `format: u8` (`GAME_RECORD_FORMAT`,
+currently 1), checked at the top of both `decide_bind` and `decide_sign` before
+any other field is trusted.
+
+The failure being defended against is a decode *success*, not a decode error: a
+later version that adds a `#[serde(default)]` field would let serde deserialize
+an old record with `last_signed_ply` defaulted to 0, silently resetting the
+double-sign guard on a real in-progress game. Bump the constant whenever the
+layout changes and teach the reader to migrate the old shape — never widen the
+check. Tests: `a_record_from_another_format_cannot_be_signed_against`,
+`the_format_check_precedes_every_other_check`.
+
 ## Wire format
 
 Everything here feeds `Record::id()` and the signing payload, so **any change

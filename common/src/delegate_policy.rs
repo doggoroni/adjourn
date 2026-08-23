@@ -75,9 +75,30 @@ pub fn derive_seed(
 
 const DOMAIN_BODY: &[u8] = b"adjourn-v1/delegate-body";
 
+/// Layout version of a persisted [`GameRecord`].
+///
+/// The delegate's secrets OUTLIVE the delegate. `DelegateRequest::RegisterDelegate`
+/// carries a `predecessors` list, and the node copies LOCAL-scope secrets forward
+/// into the new generation's namespace — that is the designed upgrade path, so a
+/// future delegate WILL read records this one wrote.
+///
+/// The failure to defend against is not a decode error but a decode *success*:
+/// add a `#[serde(default)]` field in some later version and serde will happily
+/// deserialize an old record with `last_signed_ply` defaulted to 0, silently
+/// resetting the double-sign guard on a real in-progress game. So the version is
+/// explicit and checked before any other field is trusted.
+///
+/// Bump this whenever `GameRecord`'s layout changes, and teach the reader how to
+/// migrate the old shape rather than widening the check.
+pub const GAME_RECORD_FORMAT: u8 = 1;
+
 /// What the delegate knows about one game. Persisted in the secret store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameRecord {
+    /// Always [`GAME_RECORD_FORMAT`] when written. Checked before anything
+    /// else on read.
+    #[serde(rename = "v")]
+    pub format: u8,
     pub label: String,
     pub params: GameParams,
     pub side: Side,
@@ -139,6 +160,16 @@ pub fn decide_bind(
     entropy: EntropyQuality,
     origin: Option<[u8; 32]>,
 ) -> BindDecision {
+    // Before anything else: if the record's layout is not ours we cannot trust
+    // a single field inside it, including the origin.
+    if let Some(existing) = existing {
+        if existing.format != GAME_RECORD_FORMAT {
+            return BindDecision::Refuse(Refusal::StaleRecordFormat {
+                found: existing.format,
+                expected: GAME_RECORD_FORMAT,
+            });
+        }
+    }
     let Some(origin) = origin else {
         return BindDecision::Refuse(Refusal::MissingOrigin);
     };
@@ -163,6 +194,7 @@ pub fn decide_bind(
 
     BindDecision::Bind {
         record: GameRecord {
+            format: GAME_RECORD_FORMAT,
             label: label.to_string(),
             params: params.clone(),
             side: color.into(),
@@ -192,6 +224,14 @@ pub enum SignDecision {
 /// caller may be replaying a stale position, and the ply counter is what makes
 /// that harmless.
 pub fn decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8; 32]>) -> SignDecision {
+    // Before anything else: if the record's layout is not ours we cannot trust
+    // a single field inside it — least of all `last_signed_ply`.
+    if record.format != GAME_RECORD_FORMAT {
+        return SignDecision::Refuse(Refusal::StaleRecordFormat {
+            found: record.format,
+            expected: GAME_RECORD_FORMAT,
+        });
+    }
     let Some(origin) = origin else {
         return SignDecision::Refuse(Refusal::MissingOrigin);
     };

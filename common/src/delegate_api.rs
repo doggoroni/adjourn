@@ -132,6 +132,12 @@ pub enum Refusal {
     MissingOrigin,
     ForeignOrigin,
     NoEntropy,
+    /// The persisted record was written by a different delegate generation.
+    /// Refused rather than interpreted: see `GAME_RECORD_FORMAT`.
+    StaleRecordFormat {
+        found: u8,
+        expected: u8,
+    },
     Malformed(String),
     StoreFailed,
     IllegalMove,
