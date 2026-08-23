@@ -1,6 +1,9 @@
 use chess_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
-use chess_core::delegate_policy::{classify_host_entropy, derive_seed, HostEntropy};
-use chess_core::Body;
+use chess_core::delegate_policy::{
+    classify_host_entropy, decide_bind, derive_seed, BindDecision, HostEntropy,
+};
+use chess_core::{Body, GameParams};
+use ed25519_dalek::SigningKey;
 
 #[test]
 fn requests_round_trip_through_cbor() {
@@ -105,4 +108,127 @@ fn caller_entropy_changes_the_seed_even_with_the_same_host_draw() {
     let a = derive_seed(HostEntropy::Live([2u8; 32]), Some([1u8; 32]), "g1").unwrap();
     let b = derive_seed(HostEntropy::Live([2u8; 32]), Some([9u8; 32]), "g1").unwrap();
     assert_ne!(a.0, b.0, "caller entropy must be mixed in, not ignored");
+}
+
+const ORIGIN: [u8; 32] = [3u8; 32];
+const CONTRACT: [u8; 32] = [5u8; 32];
+
+fn game() -> (SigningKey, SigningKey, GameParams) {
+    let w = SigningKey::from_bytes(&[1u8; 32]);
+    let b = SigningKey::from_bytes(&[2u8; 32]);
+    let params = GameParams {
+        white: w.verifying_key().to_bytes(),
+        black: b.verifying_key().to_bytes(),
+        nonce: [7u8; 16],
+    };
+    (w, b, params)
+}
+
+#[test]
+fn binding_without_an_origin_is_refused() {
+    let (w, _b, params) = game();
+    assert!(matches!(
+        decide_bind(
+            None,
+            "g1",
+            w.verifying_key().to_bytes(),
+            &params,
+            CONTRACT,
+            None
+        ),
+        BindDecision::Refuse(Refusal::MissingOrigin)
+    ));
+}
+
+#[test]
+fn binding_a_key_that_is_not_a_player_is_refused() {
+    let (_w, _b, params) = game();
+    let stranger = SigningKey::from_bytes(&[9u8; 32]);
+    assert!(matches!(
+        decide_bind(
+            None,
+            "g1",
+            stranger.verifying_key().to_bytes(),
+            &params,
+            CONTRACT,
+            Some(ORIGIN)
+        ),
+        BindDecision::Refuse(Refusal::KeyNotInParams)
+    ));
+}
+
+#[test]
+fn binding_records_the_side_and_starts_the_ply_counter_at_zero() {
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    assert_eq!(record.side, Side::White);
+    assert_eq!(record.origin, ORIGIN);
+    assert_eq!(record.last_signed_ply, 0);
+    assert_eq!(record.label, "g1");
+}
+
+#[test]
+fn rebinding_a_label_to_a_different_game_is_refused() {
+    // Rebinding would orphan the ply counter, which is the whole protection.
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+
+    let mut other = params.clone();
+    other.nonce = [8u8; 16]; // a different game between the same two players
+    assert!(matches!(
+        decide_bind(
+            Some(&record),
+            "g1",
+            w.verifying_key().to_bytes(),
+            &other,
+            CONTRACT,
+            Some(ORIGIN)
+        ),
+        BindDecision::Refuse(Refusal::AlreadyBound { .. })
+    ));
+}
+
+#[test]
+fn rebinding_the_same_label_to_the_same_game_is_idempotent() {
+    // A dropped response must not wedge setup.
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    let BindDecision::Bind { record: again } = decide_bind(
+        Some(&record),
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected an idempotent re-bind");
+    };
+    assert_eq!(record, again);
 }
