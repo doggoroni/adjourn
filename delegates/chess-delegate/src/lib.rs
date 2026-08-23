@@ -11,7 +11,7 @@ use chess_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, SignDecision,
 };
 use chess_core::types::{GameParams, Record};
-use chess_core::Body;
+use chess_core::{project, Body, GameState};
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;
 use freenet_stdlib::rand::rand_bytes;
@@ -99,6 +99,40 @@ fn handle_bind_game(
     }
 }
 
+/// Best-effort only. Returns `None` when we cannot tell — no local replica, or
+/// it does not decode — and the signature is granted anyway. The monotonic ply
+/// counter in `decide_sign` is the actual guarantee; requiring state here would
+/// let a cold cache lock a player out of their own game.
+fn locally_known_to_be_illegal(
+    ctx: &DelegateCtx,
+    record: &chess_core::delegate_policy::GameRecord,
+    body: &Body,
+) -> bool {
+    let Body::Move { ply, uci, .. } = body else {
+        return false;
+    };
+    // `record.contract`, NOT `record.game_id()`: a contract instance id is
+    // hash(code, params) and is a different value from our game id.
+    let Some(bytes) = ctx.get_contract_state(&record.contract) else {
+        return false;
+    };
+    let Some(state) = GameState::decode(&bytes) else {
+        return false;
+    };
+    let status = project(&state, &record.params);
+    if status.is_over() {
+        return true;
+    }
+    // Only judge when the local replica agrees about which ply is next; if it
+    // is behind, we have nothing useful to say.
+    if status.ply + 1 != *ply {
+        return false;
+    }
+    !chess_core::legal_moves(&state, &record.params)
+        .iter()
+        .any(|m| m == uci)
+}
+
 fn handle_sign(
     ctx: &mut DelegateCtx,
     origin: Option<[u8; 32]>,
@@ -111,6 +145,12 @@ fn handle_sign(
     let Some(seed) = secrets::load_seed(ctx, &record.label) else {
         return Response::Refused(Refusal::UnknownLabel);
     };
+
+    if locally_known_to_be_illegal(ctx, &record, &body) {
+        return Response::Refused(Refusal::Malformed(
+            "move is illegal in the locally known position".into(),
+        ));
+    }
 
     match decide_sign(&record, &body, origin) {
         SignDecision::Refuse(refusal) => Response::Refused(refusal),
