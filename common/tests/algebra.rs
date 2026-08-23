@@ -426,7 +426,7 @@ fn signature_malleability_does_not_split_records() {
 
     // Sanity: the payload really is what we think it is.
     let payload = signing_payload(&params.game_id(), &body);
-    assert!(payload.starts_with(b"freenet-chess-v1/sig"));
+    assert!(payload.starts_with(b"adjourn-v1/sig"));
 }
 
 #[test]

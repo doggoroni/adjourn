@@ -22,6 +22,10 @@ ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std
 sha2 = "=0.10.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 ciborium = "=0.2.2"
+# Byte fields encode as CBOR byte strings, not arrays of integers. Without this
+# a 32-byte key costs ~55 bytes on the wire. Changing it rotates every record
+# id, so it is pinned like everything else.
+serde_bytes = "=0.11.19"
 freenet-stdlib = { version = "=0.8.5", features = ["contract"] }
 adjourn-core = { path = "common" }
 

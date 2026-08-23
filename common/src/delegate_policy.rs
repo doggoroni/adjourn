@@ -9,7 +9,7 @@ use crate::types::{color_at_ply, Body, GameParams, KeyBytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DOMAIN_KEYGEN: &[u8] = b"freenet-chess-v1/keygen";
+const DOMAIN_KEYGEN: &[u8] = b"adjourn-v1/keygen";
 
 /// The result of probing the host RNG.
 ///
@@ -73,7 +73,7 @@ pub fn derive_seed(
     Ok((h.finalize().into(), quality))
 }
 
-const DOMAIN_BODY: &[u8] = b"freenet-chess-v1/delegate-body";
+const DOMAIN_BODY: &[u8] = b"adjourn-v1/delegate-body";
 
 /// What the delegate knows about one game. Persisted in the secret store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,9 +84,11 @@ pub struct GameRecord {
     /// Contract instance id of the WEB APP that bound this game. Only that app
     /// may ask for signatures on it. Note this is the app's own contract, not
     /// the game's.
+    #[serde(with = "serde_bytes")]
     pub origin: [u8; 32],
     /// Contract instance id of the GAME, supplied at bind time. Used only to
     /// read local state for the best-effort legality check.
+    #[serde(with = "serde_bytes")]
     pub contract: [u8; 32],
     /// Quality of the entropy this game's key was generated with. Recorded
     /// because a `Degraded` key's security properties differ from a
@@ -99,6 +101,7 @@ pub struct GameRecord {
     pub last_signed_ply: u16,
     /// Body hash of the move signed at `last_signed_ply`, so an identical
     /// retry can be told apart from a different move at the same ply.
+    #[serde(with = "serde_bytes")]
     pub last_move_body_hash: [u8; 32],
 }
 

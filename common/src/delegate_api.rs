@@ -43,6 +43,7 @@ pub enum Request {
     /// does; this returns the half you exchange out of band.
     CreateGameKey {
         label: String,
+        #[serde(with = "serde_bytes")]
         caller_entropy: Option<[u8; 32]>,
     },
     /// Record which game the key for `label` belongs to, once both halves are
@@ -56,9 +57,11 @@ pub enum Request {
     BindGame {
         label: String,
         params: GameParams,
+        #[serde(with = "serde_bytes")]
         contract: [u8; 32],
     },
     Sign {
+        #[serde(with = "serde_bytes")]
         game_id: GameId,
         body: Body,
     },
@@ -69,10 +72,12 @@ pub enum Request {
 pub enum Response {
     GameKey {
         label: String,
+        #[serde(with = "serde_bytes")]
         public_key: KeyBytes,
         entropy: EntropyQuality,
     },
     Bound {
+        #[serde(with = "serde_bytes")]
         game_id: GameId,
     },
     Signed {
@@ -94,8 +99,10 @@ pub enum EntropyQuality {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSummary {
     pub label: String,
+    #[serde(with = "serde_bytes")]
     pub public_key: KeyBytes,
     /// `None` until bound.
+    #[serde(with = "serde_bytes")]
     pub game_id: Option<GameId>,
     /// `None` until bound.
     pub side: Option<Side>,
@@ -110,10 +117,18 @@ pub enum Refusal {
     UnknownLabel,
     LabelExists,
     UnknownGame,
-    AlreadyBound { game_id: GameId },
+    AlreadyBound {
+        #[serde(with = "serde_bytes")]
+        game_id: GameId,
+    },
     KeyNotInParams,
-    WrongSide { ours: Side, ply_needs: Side },
-    PlyAlreadySigned { ply: u16 },
+    WrongSide {
+        ours: Side,
+        ply_needs: Side,
+    },
+    PlyAlreadySigned {
+        ply: u16,
+    },
     MissingOrigin,
     ForeignOrigin,
     NoEntropy,

@@ -13,19 +13,22 @@ use shakmaty::Color;
 pub type RecordId = [u8; 32];
 pub type KeyBytes = [u8; 32];
 
-const DOMAIN_GAME: &[u8] = b"freenet-chess-v1/game";
-const DOMAIN_GENESIS: &[u8] = b"freenet-chess-v1/genesis";
-const DOMAIN_REC: &[u8] = b"freenet-chess-v1/rec";
-const DOMAIN_SIG: &[u8] = b"freenet-chess-v1/sig";
-const DOMAIN_SIGDIGEST: &[u8] = b"freenet-chess-v1/sigdigest";
+const DOMAIN_GAME: &[u8] = b"adjourn-v1/game";
+const DOMAIN_GENESIS: &[u8] = b"adjourn-v1/genesis";
+const DOMAIN_REC: &[u8] = b"adjourn-v1/rec";
+const DOMAIN_SIG: &[u8] = b"adjourn-v1/sig";
+const DOMAIN_SIGDIGEST: &[u8] = b"adjourn-v1/sigdigest";
 
 /// Immutable contract parameters, fixed at creation and folded into the
 /// contract key. Both players can derive the same key independently.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameParams {
+    #[serde(with = "serde_bytes")]
     pub white: KeyBytes,
+    #[serde(with = "serde_bytes")]
     pub black: KeyBytes,
     /// Distinguishes repeat matchups between the same two players.
+    #[serde(with = "serde_bytes")]
     pub nonce: [u8; 16],
 }
 
@@ -83,6 +86,7 @@ pub enum Body {
     /// A half-move. `parent` is the id of the ply-1 record (or genesis at ply 1).
     Move {
         ply: u16,
+        #[serde(with = "serde_bytes")]
         parent: RecordId,
         uci: String,
     },
@@ -90,16 +94,24 @@ pub enum Body {
     Resign,
     /// A draw offer anchored to a specific head, so it expires implicitly
     /// once the game moves on.
-    DrawOffer { at: RecordId },
+    DrawOffer {
+        #[serde(with = "serde_bytes")]
+        at: RecordId,
+    },
     /// Accepts a specific offer by record id.
-    DrawAccept { offer: RecordId },
+    DrawAccept {
+        #[serde(with = "serde_bytes")]
+        offer: RecordId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub body: Body,
+    #[serde(with = "serde_bytes")]
     pub signer: KeyBytes,
     /// 64 raw ed25519 bytes.
+    #[serde(with = "serde_bytes")]
     pub sig: Vec<u8>,
 }
 

@@ -171,12 +171,19 @@ pure function of the result set.
 - **`Status.ignored` is imprecise** — it's `len - chain.len()`, so it counts
   resign/draw records as "ignored".
 
-- **CBOR encoding is ~2.4× larger than necessary.** 2494 bytes for 7 records
-  against ~150 bytes of actual content, because serde encodes `[u8; 32]` and
-  `Vec<u8>` as CBOR *arrays of integers* rather than byte strings.
-  `serde_bytes` roughly halves it. Decide this **before launch**: `body_bytes`
-  feeds both `Record::id()` and the signing payload, so changing the encoding
-  rotates every id and invalidates every signature.
+- **CBOR encoding, partially fixed.** `serde_bytes` on every byte field took a
+  7-record game from 2494 to 1706 bytes (356 -> 244 per record). Measured, not
+  estimated: the old "roughly halves it" guess was optimistic.
+
+  Two sources of bloat remain, each worth roughly what serde_bytes was:
+  the `BTreeMap` key repeats the 32-byte record id, which is already derivable
+  from the record via `rec.id()` (~55 bytes/record, fixable by serialising
+  `GameState` as an ordered list and rebuilding the map on decode); and serde
+  writes struct field names as CBOR strings (`body`, `signer`, `parent`, ...).
+
+  Both are still **breaking**: `body_bytes` feeds `Record::id()` AND the
+  signing payload, so either rotates every id and invalidates every signature.
+  Do them together, before launch, or not at all.
 
 - **`make_move` round-trips through FEN** to re-derive the position, which
   loses history. Now that `walk` tracks repetitions, this also means
