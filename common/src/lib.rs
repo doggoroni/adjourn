@@ -1,4 +1,4 @@
-﻿//! freenet-chess `common` crate: the state algebra.
+//! adjourn `common` crate (`adjourn-core`): the state algebra.
 //!
 //! No Freenet dependencies — the consistency model is testable standalone.
 

@@ -15,8 +15,8 @@
 //! `chess/bind/` exists because binding is looked up by LABEL while game
 //! records are keyed by game id.
 
-use chess_core::delegate_api::{EntropyQuality, GameId};
-use chess_core::delegate_policy::GameRecord;
+use adjourn_core::delegate_api::{EntropyQuality, GameId};
+use adjourn_core::delegate_policy::GameRecord;
 use freenet_stdlib::prelude::DelegateCtx;
 
 pub const KEY_PREFIX: &[u8] = b"chess/key/";

@@ -1,4 +1,4 @@
-# Pinned to keep chess_contract.wasm deterministic.
+# Pinned to keep adjourn_contract.wasm deterministic.
 #
 # Why this matters: the contract key is the hash of the compiled WASM. A
 # different rustc version emits different bytes and therefore a different

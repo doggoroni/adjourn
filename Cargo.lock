@@ -3,6 +3,39 @@
 version = 4
 
 [[package]]
+name = "adjourn-contract"
+version = "0.1.0"
+dependencies = [
+ "adjourn-core",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-stdlib",
+ "serde",
+]
+
+[[package]]
+name = "adjourn-core"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "ed25519-dalek",
+ "serde",
+ "sha2",
+ "shakmaty",
+]
+
+[[package]]
+name = "adjourn-delegate"
+version = "0.1.0"
+dependencies = [
+ "adjourn-core",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-stdlib",
+ "serde",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,39 +191,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "chess-contract"
-version = "0.1.0"
-dependencies = [
- "chess-core",
- "ciborium",
- "ed25519-dalek",
- "freenet-stdlib",
- "serde",
-]
-
-[[package]]
-name = "chess-core"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "ed25519-dalek",
- "serde",
- "sha2",
- "shakmaty",
-]
-
-[[package]]
-name = "chess-delegate"
-version = "0.1.0"
-dependencies = [
- "chess-core",
- "ciborium",
- "ed25519-dalek",
- "freenet-stdlib",
- "serde",
-]
 
 [[package]]
 name = "chrono"

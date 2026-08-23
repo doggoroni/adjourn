@@ -43,12 +43,12 @@ CARGO_NATIVE="$(native_path "$CARGO_HOME_PATH")"
 export RUSTFLAGS="--remap-path-prefix=$ROOT_NATIVE=/build --remap-path-prefix=$CARGO_NATIVE=/cargo ${RUSTFLAGS:-}"
 
 cargo build \
-  -p chess-delegate \
+  -p adjourn-delegate \
   --target wasm32-unknown-unknown \
   --release \
   --locked
 
-WASM="target/wasm32-unknown-unknown/release/chess_delegate.wasm"
+WASM="target/wasm32-unknown-unknown/release/adjourn_delegate.wasm"
 
 # Fail loudly rather than shipping a key that only this machine can reproduce.
 # Both spellings, because the check passing for the wrong reason is how this

@@ -1,8 +1,8 @@
 //! The tests that matter: the monoid laws, projection determinism under
 //! arbitrary delivery order, and the adversarial cases.
 
-use chess_core::types::signing_payload;
-use chess_core::*;
+use adjourn_core::types::signing_payload;
+use adjourn_core::*;
 use ed25519_dalek::SigningKey;
 use shakmaty::Color;
 

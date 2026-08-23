@@ -1,4 +1,4 @@
-# chess-delegate — design
+# adjourn-delegate — design
 
 **Date:** 2026-08-20
 **Status:** approved, not yet implemented
@@ -41,13 +41,13 @@ Deliberately excluded; none of these require the message API to change later.
 ## Architecture
 
 The split that already works for the contract: **all policy is a pure function
-in `chess-core`; the delegate crate is a thin adapter.**
+in `adjourn-core`; the delegate crate is a thin adapter.**
 
 ```
 common/src/delegate_api.rs      wire types (UI <-> delegate). No Freenet deps.
 common/src/delegate_policy.rs   the decision functions. Pure: no I/O, no clock,
                                 no randomness. Fully unit-testable standalone.
-delegates/chess-delegate/       adapter: secret-store I/O, host entropy,
+delegates/adjourn-delegate/       adapter: secret-store I/O, host entropy,
                                 message dispatch. Freenet-dependent.
 ```
 
@@ -343,7 +343,7 @@ execution error.
 - `derive_seed` fails closed when host entropy is dead and no caller entropy
 - `derive_seed` is deterministic in its inputs and changes with the label
 
-**`delegates/chess-delegate/tests/`** — adapter dispatch and secret-store round
+**`delegates/adjourn-delegate/tests/`** — adapter dispatch and secret-store round
 trips. CI-only, same `windows-sys` limitation as the contract; typechecked
 locally by compiling for wasm32.
 
@@ -360,7 +360,7 @@ freenet-main-delegate = []   # the #[delegate] macro expands to code gated on it
 crate-type = ["cdylib", "rlib"]
 ```
 
-Dependencies: `chess-core`, `freenet-stdlib`, `ciborium`, `serde`,
+Dependencies: `adjourn-core`, `freenet-stdlib`, `ciborium`, `serde`,
 `ed25519-dalek` — **no `rand`, no `getrandom`, no `rand_core`**, directly or
 transitively. We never call `SigningKey::generate()`; keys are built with
 `SigningKey::from_bytes` from a seed we derived ourselves.

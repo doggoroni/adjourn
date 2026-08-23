@@ -1,11 +1,11 @@
 [package]
-name = "chess-contract"
+name = "adjourn-contract"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-chess-core.workspace = true
+adjourn-core.workspace = true
 freenet-stdlib.workspace = true
 ciborium.workspace = true
 serde.workspace = true

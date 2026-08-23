@@ -1,17 +1,17 @@
 //! The Freenet delegate that holds per-game signing keys.
 //!
-//! All policy lives in `chess_core::delegate_policy`, which is pure and tested
+//! All policy lives in `adjourn_core::delegate_policy`, which is pure and tested
 //! standalone. This crate is the adapter: secret-store I/O, host entropy, and
 //! message dispatch.
 
 pub mod secrets;
 
-use chess_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response};
-use chess_core::delegate_policy::{
+use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response};
+use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, SignDecision,
 };
-use chess_core::types::{GameParams, Record};
-use chess_core::{project, Body, GameState};
+use adjourn_core::types::{GameParams, Record};
+use adjourn_core::{project, Body, GameState};
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;
 use freenet_stdlib::rand::rand_bytes;
@@ -27,7 +27,7 @@ fn origin_id(origin: Option<MessageOrigin>) -> Option<[u8; 32]> {
 }
 
 /// Two independent draws, so `classify_host_entropy` can spot a dead source.
-fn probe_host_entropy() -> chess_core::delegate_policy::HostEntropy {
+fn probe_host_entropy() -> adjourn_core::delegate_policy::HostEntropy {
     let first = <[u8; 32]>::try_from(rand_bytes(32).as_slice()).unwrap_or([0u8; 32]);
     let second = <[u8; 32]>::try_from(rand_bytes(32).as_slice()).unwrap_or([0u8; 32]);
     classify_host_entropy(first, second)
@@ -134,7 +134,7 @@ fn handle_bind_game(
 /// let a cold cache lock a player out of their own game.
 fn locally_known_to_be_illegal(
     ctx: &DelegateCtx,
-    record: &chess_core::delegate_policy::GameRecord,
+    record: &adjourn_core::delegate_policy::GameRecord,
     body: &Body,
 ) -> bool {
     let Body::Move { ply, uci, .. } = body else {
@@ -157,7 +157,7 @@ fn locally_known_to_be_illegal(
     if status.ply + 1 != *ply {
         return false;
     }
-    !chess_core::legal_moves(&state, &record.params)
+    !adjourn_core::legal_moves(&state, &record.params)
         .iter()
         .any(|m| m == uci)
 }

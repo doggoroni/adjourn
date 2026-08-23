@@ -1,12 +1,12 @@
-# CLAUDE.md — freenet-chess
+# CLAUDE.md — adjourn
 
 Untimed correspondence chess as a Freenet decentralized app.
 
 | crate | role |
 |---|---|
-| `common/` (`chess-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
-| `contracts/chess-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
-| `delegates/chess-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
+| `common/` (`adjourn-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
+| `contracts/adjourn-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
+| `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -243,7 +243,7 @@ contract version.
 
 ## Delegate
 
-`delegates/chess-delegate/` holds the per-game signing key and enforces one
+`delegates/adjourn-delegate/` holds the per-game signing key and enforces one
 signature per `(game, ply)` so a compromised or buggy UI cannot double-sign a
 move out from under the player. As with the contract, **build only via
 `scripts/build-delegate.sh`** — a bare `cargo build --release` embeds
@@ -255,10 +255,10 @@ machine-specific paths and produces a different, unshippable key.
   `freenet-stdlib` → `tracing-subscriber` → `windows-sys` chain as the
   contract, except the delegate has no workaround — `windows-sys` needs a full
   mingw `binutils` that the rustup `gnu` toolchain does not ship. Keeping the
-  decision logic in `chess-core` means it is still tested on every platform;
+  decision logic in `adjourn-core` means it is still tested on every platform;
   verify the delegate itself only with `--target wasm32-unknown-unknown`.
 - **The off-wasm `rand_bytes` stub returns zeros silently.** It exists so
-  `chess-core` builds on the host at all, but a zeroed "random" draw would
+  `adjourn-core` builds on the host at all, but a zeroed "random" draw would
   produce a signing key an attacker could guess. `classify_host_entropy` takes
   two independent draws and treats a dead (all-zero, or identical) source as a
   refusal rather than trusting the first draw at face value.
@@ -268,7 +268,7 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 76 tests: 59 in `chess-core` (31 algebra
+`cargo test --workspace --locked` — 76 tests: 59 in `adjourn-core` (31 algebra
 tests plus 28 delegate-policy tests), 13 contract tests, and 4 delegate adapter
 tests. The algebra tests are the point; they run randomized partitions and
 delivery orders. Keep them green. New state-shape features need a
@@ -282,10 +282,10 @@ corresponding law test, not just a happy-path test.
 - `common/tests/delegate_policy.rs` (28) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
   ply-0 sentinel guard. Runs on any platform.
-- `contracts/chess-contract/tests/interface.rs` (13) — the adapter: byte
+- `contracts/adjourn-contract/tests/interface.rs` (13) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
-- `delegates/chess-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
+- `delegates/adjourn-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
   key namespaces never collide.
 
 The `hazmat` dev-dependency on ed25519-dalek exists so the tests can forge a

@@ -55,11 +55,11 @@ jobs:
 
       - name: Assert no getrandom in the contract graph
         run: |
-          if cargo tree -p chess-contract --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
+          if cargo tree -p adjourn-contract --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
             echo "getrandom reached the contract dependency graph; the WASM will not instantiate under wasmtime"
             exit 1
           fi
-          if cargo tree -p chess-contract --target wasm32-unknown-unknown -i rand_core 2>/dev/null | grep -q rand_core; then
+          if cargo tree -p adjourn-contract --target wasm32-unknown-unknown -i rand_core 2>/dev/null | grep -q rand_core; then
             echo "rand_core reached the contract dependency graph; ed25519-dalek's rand_core feature would pull getrandom in behind it"
             exit 1
           fi
@@ -68,7 +68,7 @@ jobs:
       # not a property of the commit.
       - name: Assert the build is reproducible
         run: |
-          WASM=target/wasm32-unknown-unknown/release/chess_contract.wasm
+          WASM=target/wasm32-unknown-unknown/release/adjourn_contract.wasm
           FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
           cargo clean
           ./scripts/build-contract.sh > /dev/null
@@ -85,18 +85,18 @@ jobs:
 
       - name: Assert no getrandom in the delegate graph
         run: |
-          if cargo tree -p chess-delegate --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
+          if cargo tree -p adjourn-delegate --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
             echo "getrandom reached the delegate dependency graph; the WASM will not instantiate under wasmtime"
             exit 1
           fi
-          if cargo tree -p chess-delegate --target wasm32-unknown-unknown -i rand_core 2>/dev/null | grep -q rand_core; then
+          if cargo tree -p adjourn-delegate --target wasm32-unknown-unknown -i rand_core 2>/dev/null | grep -q rand_core; then
             echo "rand_core reached the delegate dependency graph; ed25519-dalek's rand_core feature would pull getrandom in behind it"
             exit 1
           fi
 
       - name: Assert the delegate build is reproducible
         run: |
-          WASM=target/wasm32-unknown-unknown/release/chess_delegate.wasm
+          WASM=target/wasm32-unknown-unknown/release/adjourn_delegate.wasm
           FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
           cargo clean
           ./scripts/build-delegate.sh > /dev/null
@@ -118,8 +118,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Assert common has no Freenet dependency
         run: |
-          if cargo tree -p chess-core --locked | grep -Ei 'freenet'; then
-            echo "chess-core must stay free of Freenet dependencies"
+          if cargo tree -p adjourn-core --locked | grep -Ei 'freenet'; then
+            echo "adjourn-core must stay free of Freenet dependencies"
             exit 1
           fi
-      - run: cargo test -p chess-core --locked
+      - run: cargo test -p adjourn-core --locked

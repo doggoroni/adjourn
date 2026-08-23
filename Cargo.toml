@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "contracts/chess-contract", "delegates/chess-delegate"]
+members = ["common", "contracts/adjourn-contract", "delegates/adjourn-delegate"]
 resolver = "2"
 
 # Vendored reference checkouts, not part of this build.
@@ -23,7 +23,7 @@ sha2 = "=0.10.9"
 serde = { version = "=1.0.229", features = ["derive"] }
 ciborium = "=0.2.2"
 freenet-stdlib = { version = "=0.8.5", features = ["contract"] }
-chess-core = { path = "common" }
+adjourn-core = { path = "common" }
 
 [workspace.package]
 version = "0.1.0"
@@ -33,7 +33,7 @@ edition = "2021"
 # freenet-stdlib, so LGPL obligations attach to the published binaries whatever
 # this project's own source licence says.
 license = "LGPL-3.0-only"
-repository = "https://github.com/doggoroni/freenet-chess"
+repository = "https://github.com/doggoroni/adjourn"
 
 [profile.release]
 opt-level = 'z'   # contracts are shipped as WASM; size is the cost that matters

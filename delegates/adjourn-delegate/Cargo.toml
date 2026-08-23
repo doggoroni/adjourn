@@ -1,11 +1,11 @@
 [package]
-name = "chess-delegate"
+name = "adjourn-delegate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-chess-core.workspace = true
+adjourn-core.workspace = true
 freenet-stdlib.workspace = true
 ciborium.workspace = true
 serde.workspace = true
@@ -16,7 +16,7 @@ ed25519-dalek.workspace = true
 # backend on wasm32-unknown-unknown; those crates produce wasm-bindgen
 # placeholder imports that cannot be resolved at instantiation
 # (freenet/river#241). Key material comes from `freenet_stdlib::rand::rand_bytes`
-# via a host import, mixed by `chess_core::delegate_policy::derive_seed`, and
+# via a host import, mixed by `adjourn_core::delegate_policy::derive_seed`, and
 # keys are always built with `SigningKey::from_bytes` — never `generate()`.
 
 [lib]

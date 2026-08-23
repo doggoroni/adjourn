@@ -1,14 +1,14 @@
 //! The contract interface, exercised directly — no Freenet node required.
 //!
-//! The algebra is tested in `chess-core`. What is tested here is the adapter:
+//! The algebra is tested in `adjourn-core`. What is tested here is the adapter:
 //! byte encodings, the empty-state cases, and that the contract's validity
 //! predicate is the structural one and not a chess one.
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use chess_contract::Contract;
-use chess_core::state::{Delta, Summary};
-use chess_core::{make_move, project, Body, GameParams, GameState, Record};
+use adjourn_contract::Contract;
+use adjourn_core::state::{Delta, Summary};
+use adjourn_core::{make_move, project, Body, GameParams, GameState, Record};
 use ciborium::{de::from_reader, ser::into_writer};
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;

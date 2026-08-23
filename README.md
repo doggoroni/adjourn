@@ -1,10 +1,10 @@
-# freenet-chess — core state algebra (v1 scaffold)
+# adjourn — untimed correspondence chess on Freenet
 
 An untimed correspondence chess app on Freenet.
 
-`common/` (`chess-core`) holds the state algebra and has **no Freenet
+`common/` (`adjourn-core`) holds the state algebra and has **no Freenet
 dependencies** — pure Rust, testable standalone, so the consistency model is
-verifiable on its own. `contracts/chess-contract/` is the `ContractInterface`
+verifiable on its own. `contracts/adjourn-contract/` is the `ContractInterface`
 adapter over it: bytes in, bytes out, no logic of its own.
 
 ## The design in one paragraph
@@ -28,8 +28,8 @@ concurrent writes are impossible rather than merely resolved.
 | `common/src/project.rs` | record set → position + outcome; `make_move`, `legal_moves` |
 | `common/tests/algebra.rs` | monoid laws, order-independence, adversarial cases |
 | `common/tests/adversarial.rs` | convergence attacks, outcome precedence, chess edges |
-| `contracts/chess-contract/` | the `ContractInterface` adapter |
-| `delegates/chess-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
+| `contracts/adjourn-contract/` | the `ContractInterface` adapter |
+| `delegates/adjourn-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
 
 ## Four decisions worth keeping
 
@@ -62,7 +62,7 @@ otherwise a player could resign, play on to a mate, and be awarded the win.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 76 tests (59 chess-core + 13 contract + 4 delegate adapter)
+cargo test --workspace --locked     # 76 tests (59 adjourn-core + 13 contract + 4 delegate adapter)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 
@@ -93,9 +93,9 @@ Full-game state is ~2.5 KB / 7 records for a 7-ply game (~350 bytes per move).
 
 ## Next
 
-1. ~~Wrap in `ContractInterface`~~ — done, `contracts/chess-contract`.
+1. ~~Wrap in `ContractInterface`~~ — done, `contracts/adjourn-contract`.
 2. ~~Delegate holding the per-game signing key; UI never sees it~~ — done,
-   `delegates/chess-delegate`.
+   `delegates/adjourn-delegate`.
 3. UI over the WebSocket API: `get`, `subscribe`, `update`.
 
 Deferred by design: timers, matchmaking, ratings.
@@ -108,9 +108,9 @@ identifier in the system:
 - **The CBOR encoding.** `body_bytes` feeds both `Record::id()` and the signing
   payload, so switching to `serde_bytes` (which roughly halves the state size)
   rotates every record id and invalidates every existing signature.
-- **Contract-key coupling.** `chess-core` currently compiles into the contract
+- **Contract-key coupling.** `adjourn-core` currently compiles into the contract
   WASM whether or not the contract uses it, so adding delegate code rotates the
-  *contract* key. Until that is feature-gated, any `chess-core` change moves the
+  *contract* key. Until that is feature-gated, any `adjourn-core` change moves the
   app's address.
 
 Treat published contract keys as ephemeral until this section says otherwise.

@@ -1,6 +1,6 @@
 //! The Freenet contract wrapper.
 //!
-//! All the interesting logic lives in `chess-core`, which has no Freenet
+//! All the interesting logic lives in `adjourn-core`, which has no Freenet
 //! dependencies so the algebra can be tested standalone. This crate is only the
 //! adapter: bytes in, bytes out.
 //!
@@ -11,8 +11,8 @@
 //! | `summarize_state`  | `GameState::summarize`   |
 //! | `get_state_delta`  | `GameState::delta_against` |
 
-use chess_core::state::{Delta, Summary};
-use chess_core::{GameParams, GameState};
+use adjourn_core::state::{Delta, Summary};
+use adjourn_core::{GameParams, GameState};
 use ciborium::{de::from_reader, ser::into_writer};
 use freenet_stdlib::prelude::*;
 

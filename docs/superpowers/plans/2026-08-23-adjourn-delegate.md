@@ -1,14 +1,14 @@
-# chess-delegate Implementation Plan
+# adjourn-delegate Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move the per-game ed25519 signing key into a Freenet delegate so the UI never sees it, and so a compromised UI cannot forfeit the game by double-signing a ply.
 
-**Architecture:** Three layers. `common/src/delegate_api.rs` holds plain serde wire types. `common/src/delegate_policy.rs` holds pure decision functions — no I/O, no clock, no randomness — which is where every interesting rule lives and where every meaningful test runs. `delegates/chess-delegate/` is a thin adapter doing secret-store I/O, host entropy, and message dispatch. This mirrors the `common` / `contracts` split already working in this repo, and exists because the delegate crate cannot be compiled on a Windows host at all.
+**Architecture:** Three layers. `common/src/delegate_api.rs` holds plain serde wire types. `common/src/delegate_policy.rs` holds pure decision functions — no I/O, no clock, no randomness — which is where every interesting rule lives and where every meaningful test runs. `delegates/adjourn-delegate/` is a thin adapter doing secret-store I/O, host entropy, and message dispatch. This mirrors the `common` / `contracts` split already working in this repo, and exists because the delegate crate cannot be compiled on a Windows host at all.
 
 **Tech Stack:** Rust 1.97.1, `freenet-stdlib` 0.8.5, `ed25519-dalek` 2.2.0 (verify + deterministic sign only), `sha2`, `ciborium`, `shakmaty` 0.30.1.
 
-**Spec:** `docs/superpowers/specs/2026-08-20-chess-delegate-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-20-adjourn-delegate-design.md`
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@ Every task's requirements implicitly include these.
 
 - **No `rand`, `getrandom`, or `rand_core` in the delegate dependency graph**, directly or transitively. wasmtime has no getrandom backend on `wasm32-unknown-unknown`; those crates emit wasm-bindgen placeholder imports that cannot be resolved, and the delegate fails to instantiate (freenet/river#241).
 - **Never call `SigningKey::generate()`.** Keys are always built with `SigningKey::from_bytes(&seed)` from a seed derived by `delegate_policy::derive_seed`.
-- **`chess-core` must stay free of Freenet dependencies.** CI asserts this. `delegate_api` and `delegate_policy` use only `serde`, `sha2`, `ciborium`, `shakmaty`.
+- **`adjourn-core` must stay free of Freenet dependencies.** CI asserts this. `delegate_api` and `delegate_policy` use only `serde`, `sha2`, `ciborium`, `shakmaty`.
 - **Exact `=` version pins**, `Cargo.lock` committed, `--locked` on every build. The delegate key is `BLAKE3(BLAKE3(wasm) ‖ params)`; a drifting dependency rotates it.
 - **`InboundDelegateMsg` is `#[non_exhaustive]`.** The catch-all arm returns `Err(DelegateError::Other(..))` — never `unreachable!()`, never a panic. A panic inside delegate WASM kills the runtime for the delegate and surfaces as an opaque execution error.
 - **Refusals are `Response::Refused`, not `DelegateError`.** A refusal is an expected outcome the UI must render. `DelegateError` is only for malformed input and store failures.
@@ -30,10 +30,10 @@ Every task's requirements implicitly include these.
 | `common/src/delegate_policy.rs` | `GameRecord`, `decide_bind`, `decide_sign`, entropy derivation. Pure. |
 | `common/src/lib.rs` | Add the two modules. |
 | `common/tests/delegate_policy.rs` | Every rule that matters. Runs on all platforms. |
-| `delegates/chess-delegate/Cargo.toml` | Crate config, `freenet-main-delegate` feature, `cdylib`+`rlib`. |
-| `delegates/chess-delegate/src/secrets.rs` | Secret-store key naming and typed load/store helpers. |
-| `delegates/chess-delegate/src/lib.rs` | `#[delegate]` impl, dispatch, the four handlers. |
-| `delegates/chess-delegate/tests/adapter.rs` | Dispatch and store round-trips. CI-only. |
+| `delegates/adjourn-delegate/Cargo.toml` | Crate config, `freenet-main-delegate` feature, `cdylib`+`rlib`. |
+| `delegates/adjourn-delegate/src/secrets.rs` | Secret-store key naming and typed load/store helpers. |
+| `delegates/adjourn-delegate/src/lib.rs` | `#[delegate]` impl, dispatch, the four handlers. |
+| `delegates/adjourn-delegate/tests/adapter.rs` | Dispatch and store round-trips. CI-only. |
 | `scripts/build-delegate.sh` | Canonical reproducible build. |
 | `Cargo.toml`, `.github/workflows/ci.yml`, `CLAUDE.md`, `README.md` | Wiring and docs. |
 
@@ -58,7 +58,7 @@ This repo is not yet under version control, which every later "commit" step need
 - Test: `common/tests/delegate_policy.rs`
 
 **Interfaces:**
-- Consumes: `chess_core::types::{Body, GameParams, KeyBytes, Record}`
+- Consumes: `adjourn_core::types::{Body, GameParams, KeyBytes, Record}`
 - Produces: `Side`, `GameId`, `Request`, `Response`, `EntropyQuality`, `GameSummary`, `Refusal`, and `Request::{encode,decode}` / `Response::{encode,decode}`
 
 - [ ] **Step 1: Initialise the repository**
@@ -74,8 +74,8 @@ git commit -m "chore: initial commit — algebra, contract, reproducible builds"
 Create `common/tests/delegate_policy.rs`:
 
 ```rust
-use chess_core::delegate_api::{Refusal, Request, Response, Side};
-use chess_core::Body;
+use adjourn_core::delegate_api::{Refusal, Request, Response, Side};
+use adjourn_core::Body;
 
 #[test]
 fn requests_round_trip_through_cbor() {
@@ -112,8 +112,8 @@ fn malformed_bytes_decode_to_a_refusal_not_a_panic() {
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
-Expected: FAIL — `unresolved import chess_core::delegate_api`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
+Expected: FAIL — `unresolved import adjourn_core::delegate_api`
 
 - [ ] **Step 4: Write the wire types**
 
@@ -276,7 +276,7 @@ pub mod delegate_api;
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: PASS, 3 tests
 
 - [ ] **Step 7: Commit**
@@ -306,8 +306,8 @@ The security-critical piece. `freenet_stdlib::rand::rand_bytes` reads into a zer
 Append to `common/tests/delegate_policy.rs`:
 
 ```rust
-use chess_core::delegate_api::EntropyQuality;
-use chess_core::delegate_policy::{classify_host_entropy, derive_seed, HostEntropy};
+use adjourn_core::delegate_api::EntropyQuality;
+use adjourn_core::delegate_policy::{classify_host_entropy, derive_seed, HostEntropy};
 
 #[test]
 fn all_zero_host_entropy_is_dead() {
@@ -386,8 +386,8 @@ fn caller_entropy_changes_the_seed_even_with_the_same_host_draw() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
-Expected: FAIL — `unresolved import chess_core::delegate_policy`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
+Expected: FAIL — `unresolved import adjourn_core::delegate_policy`
 
 - [ ] **Step 3: Write the implementation**
 
@@ -475,7 +475,7 @@ pub mod delegate_policy;
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: PASS, 12 tests
 
 - [ ] **Step 6: Commit**
@@ -502,8 +502,8 @@ git commit -m "feat(delegate): entropy derivation that fails closed on a dead ho
 Append to `common/tests/delegate_policy.rs`:
 
 ```rust
-use chess_core::delegate_policy::{decide_bind, BindDecision, GameRecord};
-use chess_core::GameParams;
+use adjourn_core::delegate_policy::{decide_bind, BindDecision, GameRecord};
+use adjourn_core::GameParams;
 use ed25519_dalek::SigningKey;
 
 const ORIGIN: [u8; 32] = [3u8; 32];
@@ -632,7 +632,7 @@ fn rebinding_the_same_label_to_the_same_game_is_idempotent() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: FAIL — `cannot find function decide_bind`
 
 - [ ] **Step 3: Write the implementation**
@@ -736,7 +736,7 @@ pub fn decide_bind(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: PASS, 17 tests
 
 - [ ] **Step 5: Commit**
@@ -755,7 +755,7 @@ git commit -m "feat(delegate): GameRecord and binding rules"
 - Test: `common/tests/delegate_policy.rs`
 
 **Interfaces:**
-- Consumes: `GameRecord`, `body_hash` from Task 3; `color_at_ply` from `chess_core::types`
+- Consumes: `GameRecord`, `body_hash` from Task 3; `color_at_ply` from `adjourn_core::types`
 - Produces: `SignDecision::{Sign, Refuse}`, `decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8;32]>) -> SignDecision`
 
 - [ ] **Step 1: Write the failing tests**
@@ -763,8 +763,8 @@ git commit -m "feat(delegate): GameRecord and binding rules"
 Append to `common/tests/delegate_policy.rs`:
 
 ```rust
-use chess_core::delegate_policy::{decide_sign, SignDecision};
-use chess_core::Body;
+use adjourn_core::delegate_policy::{decide_sign, SignDecision};
+use adjourn_core::Body;
 
 fn white_record() -> GameRecord {
     let (w, _b, params) = game();
@@ -825,7 +825,7 @@ fn signing_one_body_twice_produces_byte_identical_records() {
     // deterministic, so re-signing an identical body returns the same record
     // and the peer sees no new state. If this ever stopped holding, an
     // idempotent retry would start splitting into two records.
-    use chess_core::Record;
+    use adjourn_core::Record;
     let (w, _b, params) = game();
     let body = mv(1, "e2e4");
     let a = Record::sign(&w, &params, body.clone());
@@ -899,7 +899,7 @@ fn advancing_plies_updates_the_counter() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: FAIL — `cannot find function decide_sign`
 
 - [ ] **Step 3: Write the implementation**
@@ -974,12 +974,12 @@ pub fn decide_sign(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p chess-core --test delegate_policy --locked`
+Run: `cargo test -p adjourn-core --test delegate_policy --locked`
 Expected: PASS, 26 tests
 
 - [ ] **Step 5: Verify the whole common suite is still green**
 
-Run: `cargo test -p chess-core --locked`
+Run: `cargo test -p adjourn-core --locked`
 Expected: PASS — 31 pre-existing tests plus the new delegate policy tests
 
 - [ ] **Step 6: Commit**
@@ -996,9 +996,9 @@ git commit -m "feat(delegate): decide_sign — one signature per (game, ply), ev
 The delegate crate cannot be compiled on a Windows host (`freenet-stdlib` depends unconditionally on `tracing-subscriber`, which pulls `windows-sys`, which needs a full mingw binutils). Verify with `cargo check --target wasm32-unknown-unknown` throughout; the tests in Task 8 run on CI.
 
 **Files:**
-- Create: `delegates/chess-delegate/Cargo.toml`
-- Create: `delegates/chess-delegate/src/secrets.rs`
-- Create: `delegates/chess-delegate/src/lib.rs`
+- Create: `delegates/adjourn-delegate/Cargo.toml`
+- Create: `delegates/adjourn-delegate/src/secrets.rs`
+- Create: `delegates/adjourn-delegate/src/lib.rs`
 - Create: `scripts/build-delegate.sh`
 - Modify: `Cargo.toml` (workspace members)
 
@@ -1011,21 +1011,21 @@ The delegate crate cannot be compiled on a Windows host (`freenet-stdlib` depend
 In the root `Cargo.toml`, change the members line to:
 
 ```toml
-members = ["common", "contracts/chess-contract", "delegates/chess-delegate"]
+members = ["common", "contracts/adjourn-contract", "delegates/adjourn-delegate"]
 ```
 
 - [ ] **Step 2: Write the crate manifest**
 
-Create `delegates/chess-delegate/Cargo.toml`:
+Create `delegates/adjourn-delegate/Cargo.toml`:
 
 ```toml
 [package]
-name = "chess-delegate"
+name = "adjourn-delegate"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-chess-core.workspace = true
+adjourn-core.workspace = true
 freenet-stdlib.workspace = true
 ciborium.workspace = true
 serde.workspace = true
@@ -1036,7 +1036,7 @@ ed25519-dalek.workspace = true
 # backend on wasm32-unknown-unknown; those crates produce wasm-bindgen
 # placeholder imports that cannot be resolved at instantiation
 # (freenet/river#241). Key material comes from `freenet_stdlib::rand::rand_bytes`
-# via a host import, mixed by `chess_core::delegate_policy::derive_seed`, and
+# via a host import, mixed by `adjourn_core::delegate_policy::derive_seed`, and
 # keys are always built with `SigningKey::from_bytes` — never `generate()`.
 
 [lib]
@@ -1052,7 +1052,7 @@ freenet-main-delegate = []
 
 - [ ] **Step 3: Write the secret-store helpers**
 
-Create `delegates/chess-delegate/src/secrets.rs`:
+Create `delegates/adjourn-delegate/src/secrets.rs`:
 
 ```rust
 //! Secret-store key naming and typed access.
@@ -1067,8 +1067,8 @@ Create `delegates/chess-delegate/src/secrets.rs`:
 //! `chess/bind/` exists because binding is looked up by LABEL while game
 //! records are keyed by game id.
 
-use chess_core::delegate_api::GameId;
-use chess_core::delegate_policy::GameRecord;
+use adjourn_core::delegate_api::GameId;
+use adjourn_core::delegate_policy::GameRecord;
 use freenet_stdlib::prelude::DelegateCtx;
 
 pub const KEY_PREFIX: &[u8] = b"chess/key/";
@@ -1129,19 +1129,19 @@ pub fn list_labels(ctx: &DelegateCtx) -> Vec<String> {
 
 - [ ] **Step 4: Write the delegate with CreateGameKey only**
 
-Create `delegates/chess-delegate/src/lib.rs`:
+Create `delegates/adjourn-delegate/src/lib.rs`:
 
 ```rust
 //! The Freenet delegate that holds per-game signing keys.
 //!
-//! All policy lives in `chess_core::delegate_policy`, which is pure and tested
+//! All policy lives in `adjourn_core::delegate_policy`, which is pure and tested
 //! standalone. This crate is the adapter: secret-store I/O, host entropy, and
 //! message dispatch.
 
 mod secrets;
 
-use chess_core::delegate_api::{Refusal, Request, Response};
-use chess_core::delegate_policy::{classify_host_entropy, derive_seed};
+use adjourn_core::delegate_api::{Refusal, Request, Response};
+use adjourn_core::delegate_policy::{classify_host_entropy, derive_seed};
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;
 use freenet_stdlib::rand::rand_bytes;
@@ -1157,7 +1157,7 @@ fn origin_id(origin: Option<MessageOrigin>) -> Option<[u8; 32]> {
 }
 
 /// Two independent draws, so `classify_host_entropy` can spot a dead source.
-fn probe_host_entropy() -> chess_core::delegate_policy::HostEntropy {
+fn probe_host_entropy() -> adjourn_core::delegate_policy::HostEntropy {
     let first = <[u8; 32]>::try_from(rand_bytes(32).as_slice()).unwrap_or([0u8; 32]);
     let second = <[u8; 32]>::try_from(rand_bytes(32).as_slice()).unwrap_or([0u8; 32]);
     classify_host_entropy(first, second)
@@ -1236,7 +1236,7 @@ impl DelegateInterface for ChessDelegate {
 
 - [ ] **Step 5: Verify it compiles for the real target**
 
-Run: `cargo check -p chess-delegate --target wasm32-unknown-unknown --locked`
+Run: `cargo check -p adjourn-delegate --target wasm32-unknown-unknown --locked`
 Expected: no errors, no warnings
 
 - [ ] **Step 6: Write the canonical build script**
@@ -1244,9 +1244,9 @@ Expected: no errors, no warnings
 Derive it from the contract script so the reproducibility machinery cannot drift between the two:
 
 ```bash
-sed -e 's/-p chess-contract/-p chess-delegate/'     -e 's/chess_contract\.wasm/chess_delegate.wasm/'     -e 's/contract key input/delegate key input/'     -e 's/^# The canonical contract build\./# The canonical delegate build./'     scripts/build-contract.sh > scripts/build-delegate.sh
+sed -e 's/-p adjourn-contract/-p adjourn-delegate/'     -e 's/adjourn_contract\.wasm/adjourn_delegate.wasm/'     -e 's/contract key input/delegate key input/'     -e 's/^# The canonical contract build\./# The canonical delegate build./'     scripts/build-contract.sh > scripts/build-delegate.sh
 chmod +x scripts/build-delegate.sh
-grep -n "chess-delegate\|chess_delegate\|delegate key input" scripts/build-delegate.sh
+grep -n "adjourn-delegate\|adjourn_delegate\|delegate key input" scripts/build-delegate.sh
 ```
 
 Expected: three substitutions applied. Everything else — `--locked`, the `cygpath` native-path conversion, the `--remap-path-prefix` flags, and the leak check over both path spellings — is inherited verbatim. The delegate key is `BLAKE3(BLAKE3(wasm) ‖ params)`, so it has exactly the same exposure as the contract key.
@@ -1255,10 +1255,10 @@ Expected: three substitutions applied. Everything else — `--locked`, the `cygp
 
 ```bash
 ./scripts/build-delegate.sh
-FIRST=$(sha256sum target/wasm32-unknown-unknown/release/chess_delegate.wasm | cut -d' ' -f1)
+FIRST=$(sha256sum target/wasm32-unknown-unknown/release/adjourn_delegate.wasm | cut -d' ' -f1)
 cargo clean
 ./scripts/build-delegate.sh
-SECOND=$(sha256sum target/wasm32-unknown-unknown/release/chess_delegate.wasm | cut -d' ' -f1)
+SECOND=$(sha256sum target/wasm32-unknown-unknown/release/adjourn_delegate.wasm | cut -d' ' -f1)
 [ "$FIRST" = "$SECOND" ] && echo REPRODUCIBLE || echo NOT REPRODUCIBLE
 ```
 
@@ -1276,7 +1276,7 @@ git commit -m "feat(delegate): crate scaffold, secret store, and key creation"
 ### Task 6: BindGame, Sign, and ListGames handlers
 
 **Files:**
-- Modify: `delegates/chess-delegate/src/lib.rs`
+- Modify: `delegates/adjourn-delegate/src/lib.rs`
 
 **Interfaces:**
 - Consumes: `decide_bind`, `decide_sign`, `BindDecision`, `SignDecision` from Tasks 3–4; `secrets::*` from Task 5
@@ -1284,13 +1284,13 @@ git commit -m "feat(delegate): crate scaffold, secret store, and key creation"
 
 - [ ] **Step 1: Replace the `handle` stub with the full dispatch**
 
-In `delegates/chess-delegate/src/lib.rs`, add the imports:
+In `delegates/adjourn-delegate/src/lib.rs`, add the imports:
 
 ```rust
-use chess_core::delegate_api::{GameSummary, Side};
-use chess_core::delegate_policy::{decide_bind, decide_sign, BindDecision, SignDecision};
-use chess_core::types::{GameParams, Record};
-use chess_core::Body;
+use adjourn_core::delegate_api::{GameSummary, Side};
+use adjourn_core::delegate_policy::{decide_bind, decide_sign, BindDecision, SignDecision};
+use adjourn_core::types::{GameParams, Record};
+use adjourn_core::Body;
 ```
 
 and replace `handle` with:
@@ -1403,22 +1403,22 @@ fn handle(ctx: &mut DelegateCtx, origin: Option<[u8; 32]>, request: Request) -> 
 }
 ```
 
-Remove the now-unused `use chess_core::delegate_api::Side;` if the compiler reports it as unused.
+Remove the now-unused `use adjourn_core::delegate_api::Side;` if the compiler reports it as unused.
 
 - [ ] **Step 2: Verify it compiles for the real target**
 
-Run: `cargo check -p chess-delegate --target wasm32-unknown-unknown --locked`
+Run: `cargo check -p adjourn-delegate --target wasm32-unknown-unknown --locked`
 Expected: no errors, no warnings
 
 - [ ] **Step 3: Verify clippy is clean**
 
-Run: `cargo clippy -p chess-delegate --target wasm32-unknown-unknown --locked`
+Run: `cargo clippy -p adjourn-delegate --target wasm32-unknown-unknown --locked`
 Expected: no warnings
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add delegates/chess-delegate/src/lib.rs
+git add delegates/adjourn-delegate/src/lib.rs
 git commit -m "feat(delegate): bind, sign, and list handlers"
 ```
 
@@ -1429,18 +1429,18 @@ git commit -m "feat(delegate): bind, sign, and list handlers"
 The guarantee is the ply counter; this only catches honest client bugs. `get_contract_state` reads the **local replica only** — it returns `None` when the contract is not held locally and can be stale — so it must never be required.
 
 **Files:**
-- Modify: `delegates/chess-delegate/src/lib.rs`
+- Modify: `delegates/adjourn-delegate/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `chess_core::{GameState, project}`
+- Consumes: `adjourn_core::{GameState, project}`
 - Produces: no new public surface; `handle_sign` gains a pre-check
 
 - [ ] **Step 1: Add the check**
 
-In `delegates/chess-delegate/src/lib.rs` add:
+In `delegates/adjourn-delegate/src/lib.rs` add:
 
 ```rust
-use chess_core::{project, GameState};
+use adjourn_core::{project, GameState};
 
 /// Best-effort only. Returns `None` when we cannot tell — no local replica, or
 /// it does not decode — and the signature is granted anyway. The monotonic ply
@@ -1448,7 +1448,7 @@ use chess_core::{project, GameState};
 /// let a cold cache lock a player out of their own game.
 fn locally_known_to_be_illegal(
     ctx: &DelegateCtx,
-    record: &chess_core::delegate_policy::GameRecord,
+    record: &adjourn_core::delegate_policy::GameRecord,
     body: &Body,
 ) -> bool {
     let Body::Move { ply, uci, .. } = body else {
@@ -1471,7 +1471,7 @@ fn locally_known_to_be_illegal(
     if status.ply + 1 != *ply {
         return false;
     }
-    !chess_core::legal_moves(&state, &record.params).iter().any(|m| m == uci)
+    !adjourn_core::legal_moves(&state, &record.params).iter().any(|m| m == uci)
 }
 ```
 
@@ -1487,13 +1487,13 @@ and in `handle_sign`, immediately after loading `seed`:
 
 - [ ] **Step 2: Verify it compiles for the real target**
 
-Run: `cargo check -p chess-delegate --target wasm32-unknown-unknown --locked`
+Run: `cargo check -p adjourn-delegate --target wasm32-unknown-unknown --locked`
 Expected: no errors, no warnings
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add delegates/chess-delegate/src/lib.rs
+git add delegates/adjourn-delegate/src/lib.rs
 git commit -m "feat(delegate): best-effort legality check against local state"
 ```
 
@@ -1502,7 +1502,7 @@ git commit -m "feat(delegate): best-effort legality check against local state"
 ### Task 8: Adapter tests, CI, and documentation
 
 **Files:**
-- Create: `delegates/chess-delegate/tests/adapter.rs`
+- Create: `delegates/adjourn-delegate/tests/adapter.rs`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `CLAUDE.md`, `README.md`
 
@@ -1511,19 +1511,19 @@ git commit -m "feat(delegate): best-effort legality check against local state"
 
 - [ ] **Step 1: Write the adapter tests**
 
-Create `delegates/chess-delegate/tests/adapter.rs`:
+Create `delegates/adjourn-delegate/tests/adapter.rs`:
 
 ```rust
 //! Adapter-level tests. CI-only: this crate cannot be compiled on a Windows
 //! host, because `freenet-stdlib` depends unconditionally on
 //! `tracing-subscriber`, which pulls `windows-sys`.
 //!
-//! Every rule that matters is tested in `chess-core`; these cover message
+//! Every rule that matters is tested in `adjourn-core`; these cover message
 //! dispatch and the secret-store round trip.
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use chess_core::delegate_api::{Refusal, Request, Response};
+use adjourn_core::delegate_api::{Refusal, Request, Response};
 
 #[test]
 fn an_undecodable_payload_is_refused_rather_than_panicking() {
@@ -1545,9 +1545,9 @@ fn responses_survive_the_wire() {
 The cfg gate hides them from a wasm check, so lift it temporarily:
 
 ```bash
-sed -i 's/^#!\[cfg(not(target_arch = "wasm32"))\]$/\/\/ typecheck/' delegates/chess-delegate/tests/adapter.rs
-cargo check -p chess-delegate --tests --target wasm32-unknown-unknown --locked
-sed -i 's|^// typecheck$|#!\[cfg(not(target_arch = "wasm32"))\]|' delegates/chess-delegate/tests/adapter.rs
+sed -i 's/^#!\[cfg(not(target_arch = "wasm32"))\]$/\/\/ typecheck/' delegates/adjourn-delegate/tests/adapter.rs
+cargo check -p adjourn-delegate --tests --target wasm32-unknown-unknown --locked
+sed -i 's|^// typecheck$|#!\[cfg(not(target_arch = "wasm32"))\]|' delegates/adjourn-delegate/tests/adapter.rs
 ```
 
 Expected: no errors, and the gate restored afterwards
@@ -1562,14 +1562,14 @@ In `.github/workflows/ci.yml`, after the contract reproducibility step, add:
 
       - name: Assert no getrandom in the delegate graph
         run: |
-          if cargo tree -p chess-delegate --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
+          if cargo tree -p adjourn-delegate --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
             echo "getrandom reached the delegate dependency graph; the WASM will not instantiate under wasmtime"
             exit 1
           fi
 
       - name: Assert the delegate build is reproducible
         run: |
-          WASM=target/wasm32-unknown-unknown/release/chess_delegate.wasm
+          WASM=target/wasm32-unknown-unknown/release/adjourn_delegate.wasm
           FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
           cargo clean
           ./scripts/build-delegate.sh > /dev/null
@@ -1582,7 +1582,7 @@ In `.github/workflows/ci.yml`, after the contract reproducibility step, add:
 
 - [ ] **Step 4: Update the docs**
 
-In `CLAUDE.md`, add `delegates/chess-delegate/` to the crate table with the role "holds per-game signing keys; enforces one signature per (game, ply)". Add a short **Delegate** section recording:
+In `CLAUDE.md`, add `delegates/adjourn-delegate/` to the crate table with the role "holds per-game signing keys; enforces one signature per (game, ply)". Add a short **Delegate** section recording:
 - policy lives in `common/src/delegate_policy.rs` and is pure, because the delegate crate cannot be host-compiled on Windows
 - the `rand_bytes` off-wasm stub returns zeros silently, which is why `classify_host_entropy` takes two draws
 - `freenet-main-delegate` must be declared, exactly like `freenet-main-contract`
@@ -1594,9 +1594,9 @@ In `README.md`, mark roadmap item 2 done and add the delegate to the layout tabl
 
 ```bash
 cargo fmt --all --check
-cargo clippy -p chess-core --all-targets --locked
-cargo clippy -p chess-delegate --target wasm32-unknown-unknown --locked
-cargo test -p chess-core --locked
+cargo clippy -p adjourn-core --all-targets --locked
+cargo clippy -p adjourn-delegate --target wasm32-unknown-unknown --locked
+cargo test -p adjourn-core --locked
 ./scripts/build-delegate.sh
 ```
 
@@ -1605,7 +1605,7 @@ Expected: all clean; the delegate build reports a hash and no leaked paths
 - [ ] **Step 6: Commit**
 
 ```bash
-git add delegates/chess-delegate/tests .github/workflows/ci.yml CLAUDE.md README.md
+git add delegates/adjourn-delegate/tests .github/workflows/ci.yml CLAUDE.md README.md
 git commit -m "test(delegate): adapter tests, CI wiring, and docs"
 ```
 

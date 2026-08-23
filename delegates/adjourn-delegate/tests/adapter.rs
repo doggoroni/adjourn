@@ -2,7 +2,7 @@
 //! because `freenet-stdlib` depends unconditionally on `tracing-subscriber`, which
 //! pulls `windows-sys`.
 //!
-//! Every policy rule is tested in `chess-core`, where it runs on any platform. What
+//! Every policy rule is tested in `adjourn-core`, where it runs on any platform. What
 //! is checked here is narrower: for one hand-picked label and game id, the
 //! `chess/key/`, `chess/bind/` and `chess/game/` secret-store keys they produce
 //! are pairwise distinct, and a crafted label cannot forge another namespace's
@@ -11,7 +11,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use chess_delegate::secrets::{bind_secret, game_secret, key_secret, GAME_PREFIX, KEY_PREFIX};
+use adjourn_delegate::secrets::{bind_secret, game_secret, key_secret, GAME_PREFIX, KEY_PREFIX};
 
 #[test]
 fn the_three_namespaces_never_collide_for_one_label() {

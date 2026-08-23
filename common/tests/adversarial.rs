@@ -2,7 +2,7 @@
 //! and the chess edges. Each test documents CURRENT behaviour; the ones marked
 //! BUG assert the broken behaviour so that a fix flips them.
 
-use chess_core::*;
+use adjourn_core::*;
 use ed25519_dalek::SigningKey;
 use shakmaty::Color;
 
@@ -467,7 +467,7 @@ fn two_valid_signatures_on_one_body_converge_in_one_round() {
         parent: params.genesis(),
         uci: "e2e4".into(),
     };
-    let payload = chess_core::types::signing_payload(&params.game_id(), &body);
+    let payload = adjourn_core::types::signing_payload(&params.game_id(), &body);
 
     let canonical = Record::sign(&w, &params, body.clone());
 
@@ -536,7 +536,7 @@ fn property_1_sync_soundness_holds_on_a_signature_collision() {
         parent: params.genesis(),
         uci: "e2e4".into(),
     };
-    let payload = chess_core::types::signing_payload(&params.game_id(), &body);
+    let payload = adjourn_core::types::signing_payload(&params.game_id(), &body);
 
     let canonical = Record::sign(&w, &params, body.clone());
     let mut esk = ExpandedSecretKey::from(&w.to_bytes());

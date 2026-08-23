@@ -1,9 +1,9 @@
-use chess_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
-use chess_core::delegate_policy::{
+use adjourn_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
+use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
     HostEntropy, SignDecision,
 };
-use chess_core::{Body, GameParams};
+use adjourn_core::{Body, GameParams};
 use ed25519_dalek::SigningKey;
 
 #[test]
@@ -317,7 +317,7 @@ fn signing_one_body_twice_produces_byte_identical_records() {
     // deterministic, so re-signing an identical body returns the same record
     // and the peer sees no new state. If this ever stopped holding, an
     // idempotent retry would start splitting into two records.
-    use chess_core::Record;
+    use adjourn_core::Record;
     let (w, _b, params) = game();
     let body = mv(1, "e2e4");
     let a = Record::sign(&w, &params, body.clone());
