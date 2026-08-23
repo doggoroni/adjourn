@@ -101,6 +101,8 @@ pub struct GameSummary {
     pub side: Option<Side>,
     /// 0 means nothing signed yet; plies are 1-indexed.
     pub last_signed_ply: u16,
+    /// `None` for a label that exists but is not bound yet.
+    pub entropy: Option<EntropyQuality>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub enum Refusal {
     ForeignOrigin,
     NoEntropy,
     Malformed(String),
+    StoreFailed,
+    IllegalMove,
 }
 
 fn encode_cbor<T: Serialize>(value: &T) -> Vec<u8> {

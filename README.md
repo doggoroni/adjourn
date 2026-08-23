@@ -62,7 +62,7 @@ otherwise a player could resign, play on to a mate, and be awarded the win.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 45 tests
+cargo test --workspace --locked     # 76 tests (59 chess-core + 13 contract + 4 delegate adapter)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 

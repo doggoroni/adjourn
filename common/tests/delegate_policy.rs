@@ -135,6 +135,7 @@ fn binding_without_an_origin_is_refused() {
             w.verifying_key().to_bytes(),
             &params,
             CONTRACT,
+            EntropyQuality::HostBacked,
             None
         ),
         BindDecision::Refuse(Refusal::MissingOrigin)
@@ -152,6 +153,7 @@ fn binding_a_key_that_is_not_a_player_is_refused() {
             stranger.verifying_key().to_bytes(),
             &params,
             CONTRACT,
+            EntropyQuality::HostBacked,
             Some(ORIGIN)
         ),
         BindDecision::Refuse(Refusal::KeyNotInParams)
@@ -167,6 +169,7 @@ fn binding_records_the_side_and_starts_the_ply_counter_at_zero() {
         w.verifying_key().to_bytes(),
         &params,
         CONTRACT,
+        EntropyQuality::HostBacked,
         Some(ORIGIN),
     ) else {
         panic!("expected a bind");
@@ -187,6 +190,7 @@ fn rebinding_a_label_to_a_different_game_is_refused() {
         w.verifying_key().to_bytes(),
         &params,
         CONTRACT,
+        EntropyQuality::HostBacked,
         Some(ORIGIN),
     ) else {
         panic!("expected a bind");
@@ -201,6 +205,7 @@ fn rebinding_a_label_to_a_different_game_is_refused() {
             w.verifying_key().to_bytes(),
             &other,
             CONTRACT,
+            EntropyQuality::HostBacked,
             Some(ORIGIN)
         ),
         BindDecision::Refuse(Refusal::AlreadyBound { .. })
@@ -217,6 +222,7 @@ fn rebinding_the_same_label_to_the_same_game_is_idempotent() {
         w.verifying_key().to_bytes(),
         &params,
         CONTRACT,
+        EntropyQuality::HostBacked,
         Some(ORIGIN),
     ) else {
         panic!("expected a bind");
@@ -227,6 +233,7 @@ fn rebinding_the_same_label_to_the_same_game_is_idempotent() {
         w.verifying_key().to_bytes(),
         &params,
         CONTRACT,
+        EntropyQuality::HostBacked,
         Some(ORIGIN),
     ) else {
         panic!("expected an idempotent re-bind");
@@ -244,6 +251,23 @@ fn white_record() -> GameRecord {
         w.verifying_key().to_bytes(),
         &params,
         CONTRACT,
+        EntropyQuality::HostBacked,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    record
+}
+
+fn black_record() -> GameRecord {
+    let (_w, b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        b.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::HostBacked,
         Some(ORIGIN),
     ) else {
         panic!("expected a bind");
@@ -353,6 +377,36 @@ fn resign_and_draw_bodies_sign_without_touching_the_ply_counter() {
         assert_eq!(after.last_signed_ply, record.last_signed_ply);
         assert_eq!(after.last_move_body_hash, record.last_move_body_hash);
     }
+}
+
+#[test]
+fn ply_zero_is_refused_as_already_signed_not_mistaken_for_real() {
+    // `last_signed_ply` starts at 0, and the sentinel guard
+    // `record.last_signed_ply != 0` is what stops ply 0 being treated as a
+    // real signed ply that a retry could match. `color_at_ply(0)` is Black,
+    // so use a Black record to exercise the ply branch rather than
+    // `WrongSide`.
+    assert!(matches!(
+        decide_sign(&black_record(), &mv(0, "e7e5"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::PlyAlreadySigned { ply: 0 })
+    ));
+}
+
+#[test]
+fn binding_records_the_entropy_quality() {
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::Degraded,
+        Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    assert_eq!(record.entropy, EntropyQuality::Degraded);
 }
 
 #[test]

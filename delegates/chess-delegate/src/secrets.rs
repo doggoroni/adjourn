@@ -5,18 +5,25 @@
 //! chess/key/<label>     -> 32 raw signing-key bytes
 //! chess/bind/<label>    -> 32-byte game_id
 //! chess/game/<game_id>  -> CBOR(GameRecord)
+//! chess/owner/<label>   -> 32-byte origin (contract instance id) that
+//!                          created the key, so CreateGameKey/ListGames can be
+//!                          scoped to the web app that created the label
+//! chess/quality/<label> -> CBOR(EntropyQuality) recorded at CreateGameKey
+//!                          time, so BindGame can carry it into GameRecord
 //! ```
 //!
 //! `chess/bind/` exists because binding is looked up by LABEL while game
 //! records are keyed by game id.
 
-use chess_core::delegate_api::GameId;
+use chess_core::delegate_api::{EntropyQuality, GameId};
 use chess_core::delegate_policy::GameRecord;
 use freenet_stdlib::prelude::DelegateCtx;
 
 pub const KEY_PREFIX: &[u8] = b"chess/key/";
 pub const BIND_PREFIX: &[u8] = b"chess/bind/";
 pub const GAME_PREFIX: &[u8] = b"chess/game/";
+pub const OWNER_PREFIX: &[u8] = b"chess/owner/";
+pub const QUALITY_PREFIX: &[u8] = b"chess/quality/";
 
 pub fn key_secret(label: &str) -> Vec<u8> {
     [KEY_PREFIX, label.as_bytes()].concat()
@@ -28,6 +35,14 @@ pub fn bind_secret(label: &str) -> Vec<u8> {
 
 pub fn game_secret(game_id: &GameId) -> Vec<u8> {
     [GAME_PREFIX, game_id.as_slice()].concat()
+}
+
+pub fn owner_secret(label: &str) -> Vec<u8> {
+    [OWNER_PREFIX, label.as_bytes()].concat()
+}
+
+pub fn quality_secret(label: &str) -> Vec<u8> {
+    [QUALITY_PREFIX, label.as_bytes()].concat()
 }
 
 /// The 32 raw signing-key bytes for `label`, if we hold them.
@@ -43,6 +58,18 @@ pub fn load_bound_game_id(ctx: &DelegateCtx, label: &str) -> Option<GameId> {
 
 pub fn load_game(ctx: &DelegateCtx, game_id: &GameId) -> Option<GameRecord> {
     let bytes = ctx.get_secret(&game_secret(game_id))?;
+    ciborium::from_reader(bytes.as_slice()).ok()
+}
+
+/// The origin (contract instance id) that created the key for `label`, if any.
+pub fn load_owner(ctx: &DelegateCtx, label: &str) -> Option<[u8; 32]> {
+    let bytes = ctx.get_secret(&owner_secret(label))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// The entropy quality recorded for `label` at `CreateGameKey` time, if any.
+pub fn load_quality(ctx: &DelegateCtx, label: &str) -> Option<EntropyQuality> {
+    let bytes = ctx.get_secret(&quality_secret(label))?;
     ciborium::from_reader(bytes.as_slice()).ok()
 }
 

@@ -267,18 +267,25 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 31 algebra tests plus 14 contract tests. The algebra tests are the point; they
-run randomized partitions and delivery orders. Keep them green. New state-shape
-features need a corresponding law test, not just a happy-path test.
+`cargo test --workspace --locked` — 76 tests: 59 in `chess-core` (31 algebra
+tests plus 28 delegate-policy tests), 13 contract tests, and 4 delegate adapter
+tests. The algebra tests are the point; they run randomized partitions and
+delivery orders. Keep them green. New state-shape features need a
+corresponding law test, not just a happy-path test.
 
 - `common/tests/algebra.rs` (12) — the monoid laws and the original
   adversarial cases.
 - `common/tests/adversarial.rs` (19) — convergence attacks, outcome
   precedence, and the chess edges (promotion, underpromotion, castling
   notation, en passant, repetition).
-- `contracts/chess-contract/tests/interface.rs` (14) — the adapter: byte
+- `common/tests/delegate_policy.rs` (28) — the delegate's pure decision
+  functions: bind/sign refusals, entropy classification and mixing, the
+  ply-0 sentinel guard. Runs on any platform.
+- `contracts/chess-contract/tests/interface.rs` (13) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
+- `delegates/chess-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
+  key namespaces never collide.
 
 The `hazmat` dev-dependency on ed25519-dalek exists so the tests can forge a
 *second valid* signature over one body — the case invariant 4 is about. It is a

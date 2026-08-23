@@ -68,7 +68,7 @@ wire format ours, and stable across a shakmaty bump.
 ```rust
 pub enum Request {
     CreateGameKey { label: String, caller_entropy: Option<[u8; 32]> },
-    BindGame      { label: String, params: GameParams },
+    BindGame      { label: String, params: GameParams, contract: [u8; 32] },
     Sign          { game_id: [u8; 32], body: Body },
     ListGames,
 }
@@ -89,10 +89,15 @@ pub struct GameSummary {
     pub game_id: Option<[u8; 32]>,  // None until bound
     pub side: Option<Side>,          // None until bound
     pub last_signed_ply: u16,        // 0 = nothing signed yet
+    pub entropy: Option<EntropyQuality>, // None for a label not bound yet
 }
 ```
 
-`ListGames` returns labels, public keys and ply counters. Never secrets.
+`ListGames` returns labels, public keys, ply counters, and the entropy
+quality each label's key was created with. Never secrets. `CreateGameKey` and
+`ListGames` both require an origin (`Refusal::MissingOrigin` otherwise) and
+`ListGames` is scoped to labels owned by that origin, so one web app cannot
+enumerate another's labels or public keys.
 
 ### Why creation and binding are separate
 
@@ -117,6 +122,8 @@ pub struct GameRecord {
     pub params: GameParams,
     pub side: Side,
     pub origin: [u8; 32],           // contract instance id that bound the game
+    pub contract: [u8; 32],         // the GAME's contract instance id
+    pub entropy: EntropyQuality,    // carried from CreateGameKey time
     pub last_signed_ply: u16,       // 0 = none
     pub last_move_body_hash: [u8; 32],
 }
@@ -206,11 +213,25 @@ that impossible, and it does not depend on reading any state at all.
 ## Secret store layout
 
 ```
-chess/key/<label>    -> 32 raw signing-key bytes
-chess/game/<game_id> -> CBOR(GameRecord)
+chess/key/<label>     -> 32 raw signing-key bytes
+chess/bind/<label>    -> 32-byte game_id (label -> game index; records are
+                          keyed by game id, but binding is looked up by label)
+chess/game/<game_id>  -> CBOR(GameRecord)
+chess/owner/<label>   -> 32-byte origin recorded at CreateGameKey time, so
+                          CreateGameKey and ListGames can be scoped to the web
+                          app that created the label
+chess/quality/<label> -> CBOR(EntropyQuality) recorded at CreateGameKey time,
+                          so BindGame can carry it into GameRecord.entropy
 ```
 
-`list_secrets(b"chess/key/")` backs `ListGames`.
+`GameRecord` also carries `contract`: the GAME's contract instance id,
+supplied at bind time and used only to read local state for the best-effort
+legality check (distinct from `origin`, the calling WEB APP's contract
+instance id, and from `params.game_id()`). `BindGame` requests carry this
+`contract` field alongside `label` and `params`.
+
+`list_secrets(b"chess/key/")` backs `ListGames`, filtered to labels owned by
+the caller's origin.
 
 ## Entropy
 
@@ -289,8 +310,14 @@ pub enum Refusal {
     MissingOrigin, ForeignOrigin,
     NoEntropy,
     Malformed(String),
+    StoreFailed,
+    IllegalMove,
 }
 ```
+
+`StoreFailed` and `IllegalMove` are split out from what used to be a single
+overloaded `Malformed`, so the UI can tell a garbled request apart from a
+secret-store write failure and from the best-effort illegal-move refusal.
 
 Refusals are returned as `Response::Refused` — an ordinary application message,
 not a `DelegateError`. A refusal is an expected outcome, and the UI needs to

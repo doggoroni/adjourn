@@ -39,9 +39,13 @@ pub fn classify_host_entropy(first: [u8; 32], second: [u8; 32]) -> HostEntropy {
 ///
 /// Mixing never loses: the result is at least as unpredictable as the
 /// strongest input. Host entropy is the only source the UI does not control,
-/// so it alone gives "the UI cannot learn the key at generation time"; caller
-/// entropy still gives "the UI cannot learn it afterwards". With neither, this
-/// fails closed rather than producing a guessable key.
+/// so it alone gives "the UI cannot learn the key at generation time". When
+/// host entropy is Dead, EVERY input to the seed — the domain tag, the caller
+/// draw, the label — is caller-known, so a `Degraded` key is secret only if
+/// the caller discards its own contribution afterwards; the delegate has no
+/// way to enforce that a caller does this, or to detect it if they don't.
+/// With no entropy source at all, this fails closed rather than producing a
+/// guessable key.
 pub fn derive_seed(
     host: HostEntropy,
     caller: Option<[u8; 32]>,
@@ -84,6 +88,13 @@ pub struct GameRecord {
     /// Contract instance id of the GAME, supplied at bind time. Used only to
     /// read local state for the best-effort legality check.
     pub contract: [u8; 32],
+    /// Quality of the entropy this game's key was generated with. Recorded
+    /// because a `Degraded` key's security properties differ from a
+    /// `HostBacked` one, and that difference must survive a dropped
+    /// `CreateGameKey` response — the UI may never see the original
+    /// `Response::GameKey { entropy, .. }` again, but `ListGames` can still
+    /// report it from here.
+    pub entropy: EntropyQuality,
     /// Highest ply signed so far. 0 means none; plies are 1-indexed.
     pub last_signed_ply: u16,
     /// Body hash of the move signed at `last_signed_ply`, so an identical
@@ -122,6 +133,7 @@ pub fn decide_bind(
     public_key: KeyBytes,
     params: &GameParams,
     contract: [u8; 32],
+    entropy: EntropyQuality,
     origin: Option<[u8; 32]>,
 ) -> BindDecision {
     let Some(origin) = origin else {
@@ -153,6 +165,7 @@ pub fn decide_bind(
             side: color.into(),
             origin,
             contract,
+            entropy,
             last_signed_ply: 0,
             last_move_body_hash: [0u8; 32],
         },
