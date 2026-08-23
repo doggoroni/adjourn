@@ -125,21 +125,23 @@ fn game() -> (SigningKey, SigningKey, GameParams) {
     (w, b, params)
 }
 
+/// A CLI is not a web app, so the runtime gives it no MessageOrigin. Binding
+/// with `None` must therefore SUCCEED and record `None`.
 #[test]
-fn binding_without_an_origin_is_refused() {
+fn a_game_can_be_bound_with_no_origin_at_all() {
     let (w, _b, params) = game();
-    assert!(matches!(
-        decide_bind(
-            None,
-            "g1",
-            w.verifying_key().to_bytes(),
-            &params,
-            CONTRACT,
-            EntropyQuality::HostBacked,
-            None
-        ),
-        BindDecision::Refuse(Refusal::MissingOrigin)
-    ));
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::HostBacked,
+        None,
+    ) else {
+        panic!("a CLI-bound game must be allowed");
+    };
+    assert_eq!(record.origin, None);
 }
 
 #[test]
@@ -175,7 +177,7 @@ fn binding_records_the_side_and_starts_the_ply_counter_at_zero() {
         panic!("expected a bind");
     };
     assert_eq!(record.side, Side::White);
-    assert_eq!(record.origin, ORIGIN);
+    assert_eq!(record.origin, Some(ORIGIN));
     assert_eq!(record.last_signed_ply, 0);
     assert_eq!(record.label, "g1");
 }
@@ -253,6 +255,23 @@ fn white_record() -> GameRecord {
         CONTRACT,
         EntropyQuality::HostBacked,
         Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    record
+}
+
+/// A game bound the way the CLI binds one: no origin at all.
+fn cli_record() -> GameRecord {
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "cli",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::HostBacked,
+        None,
     ) else {
         panic!("expected a bind");
     };
@@ -411,20 +430,65 @@ fn signing_for_the_wrong_side_is_refused() {
     ));
 }
 
+/// ...and then only a caller with the same (absent) origin may sign.
 #[test]
-fn a_foreign_origin_is_refused() {
+fn a_cli_bound_game_is_signable_with_no_origin() {
+    let record = cli_record();
     assert!(matches!(
-        decide_sign(&white_record(), &mv(1, "e2e4"), Some(OTHER_ORIGIN)),
-        SignDecision::Refuse(Refusal::ForeignOrigin)
+        decide_sign(&record, &mv(1, "e2e4"), None),
+        SignDecision::Sign { .. }
+    ));
+}
+
+/// A web app cannot hijack a CLI-bound game by supplying an origin.
+#[test]
+fn a_web_app_cannot_sign_a_cli_bound_game() {
+    let record = cli_record();
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "e2e4"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+/// And the reverse: a CLI cannot sign a game a web app bound.
+#[test]
+fn a_cli_cannot_sign_a_web_app_bound_game() {
+    let record = white_record(); // bound with Some(ORIGIN)
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "e2e4"), None),
+        SignDecision::Refuse(Refusal::WrongOrigin)
     ));
 }
 
 #[test]
-fn a_missing_origin_is_refused() {
+fn a_different_web_app_is_still_refused() {
     assert!(matches!(
-        decide_sign(&white_record(), &mv(1, "e2e4"), None),
-        SignDecision::Refuse(Refusal::MissingOrigin)
+        decide_sign(&white_record(), &mv(1, "e2e4"), Some(OTHER_ORIGIN)),
+        SignDecision::Refuse(Refusal::WrongOrigin)
     ));
+}
+
+#[test]
+fn rebinding_from_a_different_origin_is_refused() {
+    let (w, _b, params) = game();
+    let existing = white_record();
+    assert!(matches!(
+        decide_bind(
+            Some(&existing),
+            "g1",
+            w.verifying_key().to_bytes(),
+            &params,
+            CONTRACT,
+            EntropyQuality::HostBacked,
+            Some(OTHER_ORIGIN)
+        ),
+        BindDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+#[test]
+fn the_record_format_is_now_two() {
+    assert_eq!(GAME_RECORD_FORMAT, 2);
 }
 
 #[test]

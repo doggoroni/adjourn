@@ -90,7 +90,7 @@ const DOMAIN_BODY: &[u8] = b"adjourn-v1/delegate-body";
 ///
 /// Bump this whenever `GameRecord`'s layout changes, and teach the reader how to
 /// migrate the old shape rather than widening the check.
-pub const GAME_RECORD_FORMAT: u8 = 1;
+pub const GAME_RECORD_FORMAT: u8 = 2;
 
 /// What the delegate knows about one game. Persisted in the secret store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,11 +102,17 @@ pub struct GameRecord {
     pub label: String,
     pub params: GameParams,
     pub side: Side,
-    /// Contract instance id of the WEB APP that bound this game. Only that app
-    /// may ask for signatures on it. Note this is the app's own contract, not
-    /// the game's.
+    /// Contract instance id of the web app that bound this game, or `None` if
+    /// it was bound by a client the runtime attests no origin for — a CLI over
+    /// the WebSocket API, for instance.
+    ///
+    /// Matched EXACTLY on every later call. A web-app game keeps full
+    /// protection; a `None` game refuses any caller that presents an origin.
+    /// For `None` games the real boundary is the node's own access control:
+    /// its WS API binds loopback-only and warns that anything reaching it can
+    /// read and modify keys.
     #[serde(with = "serde_bytes")]
-    pub origin: [u8; 32],
+    pub origin: Option<[u8; 32]>,
     /// Contract instance id of the GAME, supplied at bind time. Used only to
     /// read local state for the best-effort legality check.
     #[serde(with = "serde_bytes")]
@@ -169,28 +175,23 @@ pub fn decide_bind(
                 expected: GAME_RECORD_FORMAT,
             });
         }
-    }
-    let Some(origin) = origin else {
-        return BindDecision::Refuse(Refusal::MissingOrigin);
-    };
-    // Catches a UI pairing the wrong key with the wrong game.
-    let Some(color) = params.color_of(&public_key) else {
-        return BindDecision::Refuse(Refusal::KeyNotInParams);
-    };
-
-    if let Some(existing) = existing {
+        if existing.origin != origin {
+            return BindDecision::Refuse(Refusal::WrongOrigin);
+        }
         if existing.game_id() != params.game_id() {
-            // Rebinding would orphan the ply counter and reopen the
-            // double-sign hole this delegate exists to close.
             return BindDecision::Refuse(Refusal::AlreadyBound {
                 game_id: existing.game_id(),
             });
         }
-        // Same label, same game: idempotent, for dropped responses.
         return BindDecision::Bind {
             record: existing.clone(),
         };
     }
+
+    // Catches a UI pairing the wrong key with the wrong game.
+    let Some(color) = params.color_of(&public_key) else {
+        return BindDecision::Refuse(Refusal::KeyNotInParams);
+    };
 
     BindDecision::Bind {
         record: GameRecord {
@@ -232,11 +233,8 @@ pub fn decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8; 32]>) -
             expected: GAME_RECORD_FORMAT,
         });
     }
-    let Some(origin) = origin else {
-        return SignDecision::Refuse(Refusal::MissingOrigin);
-    };
-    if origin != record.origin {
-        return SignDecision::Refuse(Refusal::ForeignOrigin);
+    if record.origin != origin {
+        return SignDecision::Refuse(Refusal::WrongOrigin);
     }
 
     match body {

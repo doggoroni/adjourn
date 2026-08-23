@@ -129,8 +129,9 @@ pub enum Refusal {
     PlyAlreadySigned {
         ply: u16,
     },
-    MissingOrigin,
-    ForeignOrigin,
+    /// The caller is not who bound this game. With `Option` equality there is
+    /// exactly one way to fail — you are not the binder — so one variant.
+    WrongOrigin,
     NoEntropy,
     /// The persisted record was written by a different delegate generation.
     /// Refused rather than interpreted: see `GAME_RECORD_FORMAT`.

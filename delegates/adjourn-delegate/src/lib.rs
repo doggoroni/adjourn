@@ -45,9 +45,6 @@ fn handle_create_game_key(
     label: String,
     caller_entropy: Option<[u8; 32]>,
 ) -> Response {
-    let Some(origin) = origin else {
-        return Response::Refused(Refusal::MissingOrigin);
-    };
     if ctx.get_secret(&secrets::key_secret(&label)).is_some() {
         return Response::Refused(Refusal::LabelExists);
     }
@@ -64,10 +61,15 @@ fn handle_create_game_key(
         return Response::Refused(Refusal::StoreFailed);
     }
     if !ctx.set_secret(&secrets::key_secret(&label), &seed)
-        || !ctx.set_secret(&secrets::owner_secret(&label), &origin)
         || !ctx.set_secret(&secrets::quality_secret(&label), &quality_buf)
     {
         return Response::Refused(Refusal::StoreFailed);
+    }
+    // Only store owner when origin is Some.
+    if let Some(origin_id) = origin {
+        if !ctx.set_secret(&secrets::owner_secret(&label), &origin_id) {
+            return Response::Refused(Refusal::StoreFailed);
+        }
     }
     Response::GameKey {
         label,
@@ -197,15 +199,12 @@ fn handle_sign(
 }
 
 fn handle_list_games(ctx: &DelegateCtx, origin: Option<[u8; 32]>) -> Response {
-    let Some(origin) = origin else {
-        return Response::Refused(Refusal::MissingOrigin);
-    };
     let mut games = Vec::new();
     for label in secrets::list_labels(ctx) {
-        // Only labels created by this same web app are visible. Otherwise any
+        // Only labels created by this same origin (if any) are visible. Otherwise any
         // web app on the node could enumerate every label and public key the
         // user holds across all their chess identities.
-        if secrets::load_owner(ctx, &label) != Some(origin) {
+        if secrets::load_owner(ctx, &label) != origin {
             continue;
         }
         let Some(seed) = secrets::load_seed(ctx, &label) else {
