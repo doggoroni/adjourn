@@ -295,6 +295,26 @@ corresponding law test, not just a happy-path test.
 - `delegates/adjourn-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
   key namespaces never collide.
 
+### Check against the network's own verifier
+
+`fdev conformance` runs the *same* verifier freenet-core runs, over a corpus of
+real states, and it catches things our own tests structurally cannot:
+
+```sh
+fdev conformance   --wasm target/wasm32-unknown-unknown/release/adjourn_contract.wasm   --params params.bin --state state_a.bin --state state_b.bin ...
+```
+
+It found `self_delta_empty` — `get_state_delta` returned a CBOR-encoded empty
+list (one byte, `0x80`) instead of zero bytes, so freenet-core's "empty delta ->
+skip" broadcast path could never fire. Our tests missed it because they assert
+on the DECODED delta, which really is empty; the network reads the encoded
+length. That is the same failure that drove River's 2026-07-25 incident, where
+the room contract took 63.7% of network-wide byte-weighted broadcast work.
+
+Feed it partial and adversarial states, not just happy games -- the merge laws
+only bite when peers hold different fragments. Current status: 348 cases, 348
+held, 0 violations.
+
 The `hazmat` dev-dependency on ed25519-dalek exists so the tests can forge a
 *second valid* signature over one body — the case invariant 4 is about. It is a
 dev-dependency only and never enters the contract build.

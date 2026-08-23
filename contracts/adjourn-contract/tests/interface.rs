@@ -263,6 +263,28 @@ fn an_empty_summary_asks_for_everything() {
     assert_eq!(decoded.len(), state.len(), "peer holding nothing needs all");
 }
 
+/// The network decides whether to skip a broadcast by looking at the ENCODED
+/// delta length. An empty `Vec<Record>` CBOR-encodes to one byte (`0x80`),
+/// which is not empty -- so a peer that is already up to date still receives a
+/// delta, freenet-core's "empty delta -> skip" path never fires, and two peers
+/// can re-offer to each other indefinitely. That is the failure that drove
+/// River's 2026-07-25 bandwidth incident, where the room contract reached
+/// 63.7% of all byte-weighted broadcast work network-wide.
+///
+/// `fdev conformance` reports this as the `self_delta_empty` diagnostic. Note
+/// that asserting on the DECODED delta cannot catch it: the decoded vec really
+/// is empty. Only the wire length tells the truth.
+#[test]
+fn a_delta_against_our_own_summary_is_zero_bytes() {
+    let (state, params, _, _) = play(&["e2e4", "e7e5"]);
+    let d = state_delta(&params, &state, summarize(&params, &state));
+    assert!(
+        d.as_ref().is_empty(),
+        "an up-to-date peer must get zero bytes, got {}",
+        d.as_ref().len()
+    );
+}
+
 /// The whole point, end to end: two peers that have seen different halves of a
 /// game reconcile in one round through the contract interface.
 #[test]
@@ -299,9 +321,16 @@ fn two_peers_converge_in_one_round() {
         "converged states must be byte-identical"
     );
 
-    // And a second round is empty in both directions.
-    let again: Delta =
-        from_reader(state_delta(&params, &b_after, summarize(&params, &a_after)).as_ref())
-            .expect("decode");
-    assert!(again.is_empty(), "sync did not settle in one round");
+    // And a second round is empty in both directions -- checked on the WIRE
+    // length, because that is what freenet-core's broadcast-skip path reads.
+    // Zero bytes is not decodable CBOR, which is the point: there is nothing
+    // to decode.
+    for (from, to) in [(&b_after, &a_after), (&a_after, &b_after)] {
+        let again = state_delta(&params, from, summarize(&params, to));
+        assert!(
+            again.as_ref().is_empty(),
+            "sync did not settle in one round: {} bytes still offered",
+            again.as_ref().len()
+        );
+    }
 }

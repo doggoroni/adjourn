@@ -176,6 +176,23 @@ impl ContractInterface for Contract {
                 .map_err(|e| ContractError::Deser(e.to_string()))?
         };
 
-        Ok(StateDelta::from(encode(&game.delta_against(&summary))?))
+        let delta = game.delta_against(&summary);
+
+        // A peer that is already up to date must get ZERO bytes, not a
+        // CBOR-encoded empty list -- which is one byte, `0x80`.
+        //
+        // freenet-core decides whether to skip a broadcast on the ENCODED
+        // length, so a delta that is never empty keeps the "empty delta ->
+        // skip" path from ever firing and lets two peers re-offer to each
+        // other indefinitely. That is what drove River's 2026-07-25 bandwidth
+        // incident. `fdev conformance` flags it as `self_delta_empty`.
+        //
+        // `update_state` already treats empty delta bytes as a no-op, so the
+        // two halves stay symmetric.
+        if delta.is_empty() {
+            return Ok(StateDelta::from(Vec::new()));
+        }
+
+        Ok(StateDelta::from(encode(&delta)?))
     }
 }
