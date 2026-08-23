@@ -29,6 +29,7 @@ concurrent writes are impossible rather than merely resolved.
 | `common/tests/algebra.rs` | monoid laws, order-independence, adversarial cases |
 | `common/tests/adversarial.rs` | convergence attacks, outcome precedence, chess edges |
 | `contracts/chess-contract/` | the `ContractInterface` adapter |
+| `delegates/chess-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
 
 ## Four decisions worth keeping
 
@@ -93,7 +94,8 @@ Full-game state is ~2.5 KB / 7 records for a 7-ply game (~350 bytes per move).
 ## Next
 
 1. ~~Wrap in `ContractInterface`~~ — done, `contracts/chess-contract`.
-2. Delegate holding the per-game signing key; UI never sees it.
+2. ~~Delegate holding the per-game signing key; UI never sees it~~ — done,
+   `delegates/chess-delegate`.
 3. UI over the WebSocket API: `get`, `subscribe`, `update`.
 
 Deferred by design: timers, matchmaking, ratings.

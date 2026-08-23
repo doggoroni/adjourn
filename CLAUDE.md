@@ -6,6 +6,7 @@ Untimed correspondence chess as a Freenet decentralized app.
 |---|---|
 | `common/` (`chess-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
 | `contracts/chess-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
+| `delegates/chess-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -238,6 +239,31 @@ contract version.
 - **Host builds need a full linker toolchain.** `freenet-stdlib` depends on
   `tracing-subscriber` unconditionally, which pulls `windows-sys` on Windows.
   The wasm32 target does not.
+
+## Delegate
+
+`delegates/chess-delegate/` holds the per-game signing key and enforces one
+signature per `(game, ply)` so a compromised or buggy UI cannot double-sign a
+move out from under the player. As with the contract, **build only via
+`scripts/build-delegate.sh`** — a bare `cargo build --release` embeds
+machine-specific paths and produces a different, unshippable key.
+
+- **All policy lives in `common/src/delegate_policy.rs`, and it is pure** — no
+  `DelegateCtx`, no secret-store I/O. That is deliberate, not just tidy: the
+  delegate crate **cannot be host-compiled on Windows**, for the same
+  `freenet-stdlib` → `tracing-subscriber` → `windows-sys` chain as the
+  contract, except the delegate has no workaround — `windows-sys` needs a full
+  mingw `binutils` that the rustup `gnu` toolchain does not ship. Keeping the
+  decision logic in `chess-core` means it is still tested on every platform;
+  verify the delegate itself only with `--target wasm32-unknown-unknown`.
+- **The off-wasm `rand_bytes` stub returns zeros silently.** It exists so
+  `chess-core` builds on the host at all, but a zeroed "random" draw would
+  produce a signing key an attacker could guess. `classify_host_entropy` takes
+  two independent draws and treats a dead (all-zero, or identical) source as a
+  refusal rather than trusting the first draw at face value.
+- **The `freenet-main-delegate` feature must be declared** by the delegate
+  crate, exactly like `freenet-main-contract` — the `#[delegate]` macro
+  expands to code gated on it.
 
 ## Testing
 

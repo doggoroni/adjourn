@@ -76,6 +76,28 @@ jobs:
             exit 1
           fi
 
+      - name: Build delegate WASM (canonical)
+        run: ./scripts/build-delegate.sh
+
+      - name: Assert no getrandom in the delegate graph
+        run: |
+          if cargo tree -p chess-delegate --target wasm32-unknown-unknown -i getrandom 2>/dev/null | grep -q getrandom; then
+            echo "getrandom reached the delegate dependency graph; the WASM will not instantiate under wasmtime"
+            exit 1
+          fi
+
+      - name: Assert the delegate build is reproducible
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/chess_delegate.wasm
+          FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
+          cargo clean
+          ./scripts/build-delegate.sh > /dev/null
+          SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
+          if [ "$FIRST" != "$SECOND" ]; then
+            echo "delegate WASM is not reproducible; the delegate key would be unstable"
+            exit 1
+          fi
+
   # The point of keeping `common` free of Freenet dependencies: the algebra is
   # verifiable on its own, with no contract runtime in the picture.
   algebra-standalone:
