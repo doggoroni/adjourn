@@ -6,8 +6,12 @@
 
 pub mod secrets;
 
-use chess_core::delegate_api::{Refusal, Request, Response};
-use chess_core::delegate_policy::{classify_host_entropy, derive_seed};
+use chess_core::delegate_api::{GameSummary, Refusal, Request, Response};
+use chess_core::delegate_policy::{
+    classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, SignDecision,
+};
+use chess_core::types::{GameParams, Record};
+use chess_core::Body;
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;
 use freenet_stdlib::rand::rand_bytes;
@@ -61,14 +65,112 @@ fn handle_create_game_key(
     }
 }
 
+fn handle_bind_game(
+    ctx: &mut DelegateCtx,
+    origin: Option<[u8; 32]>,
+    label: String,
+    params: GameParams,
+    contract: [u8; 32],
+) -> Response {
+    let Some(seed) = secrets::load_seed(ctx, &label) else {
+        return Response::Refused(Refusal::UnknownLabel);
+    };
+    let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+
+    let existing =
+        secrets::load_bound_game_id(ctx, &label).and_then(|id| secrets::load_game(ctx, &id));
+
+    match decide_bind(
+        existing.as_ref(),
+        &label,
+        public_key,
+        &params,
+        contract,
+        origin,
+    ) {
+        BindDecision::Refuse(refusal) => Response::Refused(refusal),
+        BindDecision::Bind { record } => {
+            let game_id = record.game_id();
+            if !secrets::store_game(ctx, &record) {
+                return Response::Refused(Refusal::Malformed("secret store write failed".into()));
+            }
+            Response::Bound { game_id }
+        }
+    }
+}
+
+fn handle_sign(
+    ctx: &mut DelegateCtx,
+    origin: Option<[u8; 32]>,
+    game_id: [u8; 32],
+    body: Body,
+) -> Response {
+    let Some(record) = secrets::load_game(ctx, &game_id) else {
+        return Response::Refused(Refusal::UnknownGame);
+    };
+    let Some(seed) = secrets::load_seed(ctx, &record.label) else {
+        return Response::Refused(Refusal::UnknownLabel);
+    };
+
+    match decide_sign(&record, &body, origin) {
+        SignDecision::Refuse(refusal) => Response::Refused(refusal),
+        SignDecision::Sign { updated } => {
+            // Persist BEFORE handing out the signature. If the store write
+            // fails we must not release a signature whose ply we did not
+            // record, or a retry could produce a different move at that ply.
+            if !secrets::store_game(ctx, &updated) {
+                return Response::Refused(Refusal::Malformed("secret store write failed".into()));
+            }
+            let key = SigningKey::from_bytes(&seed);
+            Response::Signed {
+                record: Record::sign(&key, &record.params, body),
+            }
+        }
+    }
+}
+
+fn handle_list_games(ctx: &DelegateCtx) -> Response {
+    let mut games = Vec::new();
+    for label in secrets::list_labels(ctx) {
+        let Some(seed) = secrets::load_seed(ctx, &label) else {
+            continue;
+        };
+        let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let bound =
+            secrets::load_bound_game_id(ctx, &label).and_then(|id| secrets::load_game(ctx, &id));
+        games.push(match bound {
+            Some(record) => GameSummary {
+                label,
+                public_key,
+                game_id: Some(record.game_id()),
+                side: Some(record.side),
+                last_signed_ply: record.last_signed_ply,
+            },
+            None => GameSummary {
+                label,
+                public_key,
+                game_id: None,
+                side: None,
+                last_signed_ply: 0,
+            },
+        });
+    }
+    Response::Games(games)
+}
+
 fn handle(ctx: &mut DelegateCtx, origin: Option<[u8; 32]>, request: Request) -> Response {
-    let _ = origin;
     match request {
         Request::CreateGameKey {
             label,
             caller_entropy,
         } => handle_create_game_key(ctx, label, caller_entropy),
-        _ => Response::Refused(Refusal::Malformed("not yet implemented".into())),
+        Request::BindGame {
+            label,
+            params,
+            contract,
+        } => handle_bind_game(ctx, origin, label, params, contract),
+        Request::Sign { game_id, body } => handle_sign(ctx, origin, game_id, body),
+        Request::ListGames => handle_list_games(ctx),
     }
 }
 
