@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "contracts/adjourn-contract", "delegates/adjourn-delegate"]
+members = ["common", "contracts/adjourn-contract", "delegates/adjourn-delegate", "cli"]
 resolver = "2"
 
 # Vendored reference checkouts, not part of this build.
@@ -28,6 +28,14 @@ ciborium = "=0.2.2"
 serde_bytes = "=0.11.19"
 freenet-stdlib = { version = "=0.8.5", features = ["contract"] }
 adjourn-core = { path = "common" }
+adjourn-contract = { path = "contracts/adjourn-contract" }
+adjourn-delegate = { path = "delegates/adjourn-delegate" }
+bs58 = "=0.5.1"
+clap = { version = "=4.5.51", features = ["derive"] }
+tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = "=0.24.0"
+anyhow = "=1.0.100"
+thiserror = "=2.0.20"
 
 [workspace.package]
 version = "0.1.0"
