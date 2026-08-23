@@ -1,0 +1,34 @@
+[package]
+name = "chess-delegate"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chess-core.workspace = true
+freenet-stdlib.workspace = true
+ciborium.workspace = true
+serde.workspace = true
+ed25519-dalek.workspace = true
+
+# NOTE: do NOT add `rand`, `getrandom`, or `rand_core` here, directly or
+# transitively. The delegate WASM runs in wasmtime, which has no getrandom
+# backend on wasm32-unknown-unknown; those crates produce wasm-bindgen
+# placeholder imports that cannot be resolved at instantiation
+# (freenet/river#241). Key material comes from `freenet_stdlib::rand::rand_bytes`
+# via a host import, mixed by `chess_core::delegate_policy::derive_seed`, and
+# keys are always built with `SigningKey::from_bytes` — never `generate()`.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["freenet-main-delegate"]
+# The `#[delegate]` macro expands to code gated on this cfg; without the
+# feature declared the generated exports are compiled out and the WASM has no
+# entry points. River declares it for the same reason.
+freenet-main-delegate = []
+# Declared (but unused) so cargo's check-cfg lint doesn't flag the `#[cfg(feature
+# = "trace")]` blocks the `#[delegate]` macro expands into this crate — those
+# blocks come from freenet-stdlib's own `trace` feature, checked against the
+# destination crate rather than the defining one. Not wired to anything.
+trace = []

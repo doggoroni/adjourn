@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "contracts/chess-contract"]
+members = ["common", "contracts/chess-contract", "delegates/chess-delegate"]
 resolver = "2"
 
 # Vendored reference checkouts, not part of this build.
