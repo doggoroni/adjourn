@@ -100,6 +100,34 @@ Full-game state is ~2.5 KB / 7 records for a 7-ply game (~350 bytes per move).
 
 Deferred by design: timers, matchmaking, ratings.
 
+## Status — pre-1.0, do not pin a contract key yet
+
+The wire format is **not frozen**. Two changes still pending will rotate every
+identifier in the system:
+
+- **The CBOR encoding.** `body_bytes` feeds both `Record::id()` and the signing
+  payload, so switching to `serde_bytes` (which roughly halves the state size)
+  rotates every record id and invalidates every existing signature.
+- **Contract-key coupling.** `chess-core` currently compiles into the contract
+  WASM whether or not the contract uses it, so adding delegate code rotates the
+  *contract* key. Until that is feature-gated, any `chess-core` change moves the
+  app's address.
+
+Treat published contract keys as ephemeral until this section says otherwise.
+
+## Licence
+
+LGPL-3.0-only, matching the Freenet ecosystem (`freenet-stdlib`,
+`freenet-scaffold` and River are all LGPL-3.0-only).
+
+`LICENSE` is the LGPL-3.0 text. LGPL-3.0 incorporates the GPL-3.0 by reference
+rather than restating it, so the GPL-3.0 text is included as `LICENSE.GPL-3.0`;
+you need both to have the full terms.
+
+Note that the shipped contract and delegate WASM statically link
+`freenet-stdlib`, so LGPL obligations attach to those binaries when you publish
+them to the network — publishing a contract is distribution.
+
 ## Note on pinned versions
 
 `Cargo.toml` pins exact versions because the contract key is the hash of the

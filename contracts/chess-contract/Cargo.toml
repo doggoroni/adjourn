@@ -2,6 +2,7 @@
 name = "chess-contract"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 chess-core.workspace = true

@@ -7,3 +7,7 @@
 
 # Subagent-driven-development scratch workspace.
 /.superpowers
+
+# Vendored copy of the Freenet whitepaper. Read it locally, but do not
+# redistribute it here: https://freenet.org/whitepaper/
+/freenet-whitepaper.pdf

@@ -28,6 +28,11 @@ chess-core = { path = "common" }
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Matches the Freenet ecosystem (freenet-stdlib, freenet-scaffold and River are
+# all LGPL-3.0-only). The shipped contract and delegate WASM statically link
+# freenet-stdlib, so LGPL obligations attach to the published binaries whatever
+# this project's own source licence says.
+license = "LGPL-3.0-only"
 
 [profile.release]
 opt-level = 'z'   # contracts are shipped as WASM; size is the cost that matters

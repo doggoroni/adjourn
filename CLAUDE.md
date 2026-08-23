@@ -13,8 +13,9 @@ Untimed correspondence chess as a Freenet decentralized app.
 
 ## Read before changing anything
 
-- `freenetwhitepaper.pdf` — especially §4 (contract algebra, summary/delta) and
-  §7.4 (what the platform can't do)
+- The Freenet whitepaper: https://freenet.org/whitepaper/ — especially §4
+  (contract algebra, summary/delta) and §7.4 (what the platform can't do).
+  Deliberately not vendored here; fetch your own copy.
 - Tutorial: https://freenet.org/build/manual/tutorial/
 - Contract interface: https://freenet.org/build/manual/contract-interface/
 - Reference app (read this): https://github.com/freenet/river
