@@ -15,9 +15,56 @@
 //! `chess/bind/` exists because binding is looked up by LABEL while game
 //! records are keyed by game id.
 
+use std::collections::BTreeMap;
+
 use adjourn_core::delegate_api::{EntropyQuality, GameId};
 use adjourn_core::delegate_policy::GameRecord;
 use freenet_stdlib::prelude::DelegateCtx;
+
+/// The delegate's persistence, abstracted so the handlers can run off-wasm.
+///
+/// `DelegateCtx`'s secret methods are FFI stubs outside WASM — they return
+/// `None` and `false` unconditionally — so without this the dispatch code
+/// could never be tested on a host, and an in-memory fake would have to
+/// reimplement it and drift from it invisibly.
+pub trait SecretStore {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn set(&mut self, key: &[u8], value: &[u8]) -> bool;
+    fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>>;
+}
+
+impl SecretStore for DelegateCtx {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_secret(key)
+    }
+    fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+        self.set_secret(key, value)
+    }
+    fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
+        self.list_secrets(prefix)
+    }
+}
+
+/// Not `#[cfg(test)]`: the CLI's `FakeNode` uses it to run the real delegate.
+#[derive(Debug, Default, Clone)]
+pub struct MemoryStore(BTreeMap<Vec<u8>, Vec<u8>>);
+
+impl SecretStore for MemoryStore {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.0.get(key).cloned()
+    }
+    fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+        self.0.insert(key.to_vec(), value.to_vec());
+        true
+    }
+    fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
+        self.0
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+}
 
 pub const KEY_PREFIX: &[u8] = b"chess/key/";
 pub const BIND_PREFIX: &[u8] = b"chess/bind/";
@@ -46,48 +93,48 @@ pub fn quality_secret(label: &str) -> Vec<u8> {
 }
 
 /// The 32 raw signing-key bytes for `label`, if we hold them.
-pub fn load_seed(ctx: &DelegateCtx, label: &str) -> Option<[u8; 32]> {
-    let bytes = ctx.get_secret(&key_secret(label))?;
+pub fn load_seed<S: SecretStore>(store: &S, label: &str) -> Option<[u8; 32]> {
+    let bytes = store.get(&key_secret(label))?;
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
-pub fn load_bound_game_id(ctx: &DelegateCtx, label: &str) -> Option<GameId> {
-    let bytes = ctx.get_secret(&bind_secret(label))?;
+pub fn load_bound_game_id<S: SecretStore>(store: &S, label: &str) -> Option<GameId> {
+    let bytes = store.get(&bind_secret(label))?;
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
-pub fn load_game(ctx: &DelegateCtx, game_id: &GameId) -> Option<GameRecord> {
-    let bytes = ctx.get_secret(&game_secret(game_id))?;
+pub fn load_game<S: SecretStore>(store: &S, game_id: &GameId) -> Option<GameRecord> {
+    let bytes = store.get(&game_secret(game_id))?;
     ciborium::from_reader(bytes.as_slice()).ok()
 }
 
 /// The origin (contract instance id) that created the key for `label`, if any.
-pub fn load_owner(ctx: &DelegateCtx, label: &str) -> Option<[u8; 32]> {
-    let bytes = ctx.get_secret(&owner_secret(label))?;
+pub fn load_owner<S: SecretStore>(store: &S, label: &str) -> Option<[u8; 32]> {
+    let bytes = store.get(&owner_secret(label))?;
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
 /// The entropy quality recorded for `label` at `CreateGameKey` time, if any.
-pub fn load_quality(ctx: &DelegateCtx, label: &str) -> Option<EntropyQuality> {
-    let bytes = ctx.get_secret(&quality_secret(label))?;
+pub fn load_quality<S: SecretStore>(store: &S, label: &str) -> Option<EntropyQuality> {
+    let bytes = store.get(&quality_secret(label))?;
     ciborium::from_reader(bytes.as_slice()).ok()
 }
 
 /// Writes the game record and the label -> game_id index together. Returns
 /// false if either write fails.
-pub fn store_game(ctx: &mut DelegateCtx, record: &GameRecord) -> bool {
+pub fn store_game<S: SecretStore>(store: &mut S, record: &GameRecord) -> bool {
     let mut buf = Vec::new();
     if ciborium::into_writer(record, &mut buf).is_err() {
         return false;
     }
     let game_id = record.game_id();
-    ctx.set_secret(&game_secret(&game_id), &buf)
-        && ctx.set_secret(&bind_secret(&record.label), &game_id)
+    store.set(&game_secret(&game_id), &buf) && store.set(&bind_secret(&record.label), &game_id)
 }
 
 /// Labels we hold a key for, recovered from the `chess/key/` prefix.
-pub fn list_labels(ctx: &DelegateCtx) -> Vec<String> {
-    ctx.list_secrets(KEY_PREFIX)
+pub fn list_labels<S: SecretStore>(store: &S) -> Vec<String> {
+    store
+        .list(KEY_PREFIX)
         .into_iter()
         .filter_map(|k| {
             let suffix = k.strip_prefix(KEY_PREFIX)?;
