@@ -15,6 +15,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "freenet-stdlib",
+ "rand",
  "serde",
  "serde_bytes",
  "thiserror",
