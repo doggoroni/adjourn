@@ -110,13 +110,21 @@ jobs:
             exit 1
           fi
 
+      # Self-contained on purpose: the contract's reproducibility step above runs
+      # `cargo clean`, which deletes the delegate WASM built earlier in the job.
+      # This step therefore builds its own first artifact rather than hashing one
+      # a sibling step may have removed -- hashing a missing file yields an empty
+      # FIRST, which can never equal SECOND and fails for the wrong reason.
       - name: Assert the delegate build is reproducible
         run: |
           WASM=target/wasm32-unknown-unknown/release/adjourn_delegate.wasm
+          ./scripts/build-delegate.sh > /dev/null
           FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
           cargo clean
           ./scripts/build-delegate.sh > /dev/null
           SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
+          echo "first:  $FIRST"
+          echo "second: $SECOND"
           if [ "$FIRST" != "$SECOND" ]; then
             echo "delegate WASM is not reproducible; the delegate key would be unstable"
             exit 1
