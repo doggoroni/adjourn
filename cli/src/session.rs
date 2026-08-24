@@ -242,6 +242,58 @@ async fn fetch_state<N: NodeClient>(node: &mut N, contract: [u8; 32]) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("contract state did not decode as a GameState"))
 }
 
+/// Everything a command needs to act on a bound game: the delegate's record
+/// of it, the contract to address, and the position as currently projected.
+///
+/// Built by [`open_game`], which every move-flow command goes through so the
+/// "pull the summary apart, check the build, GET, project" sequence exists
+/// in exactly one place. `open_game` does NOT run any command-specific
+/// pre-check (turn order, legality, "already over") — those differ per
+/// command (`sign_move_at_ply` skips them all on purpose) and stay in each
+/// caller.
+struct OpenGame {
+    params: GameParams,
+    game_id: [u8; 32],
+    container: ContractContainer,
+    contract: [u8; 32],
+    side: Side,
+    state: GameState,
+    status: Status,
+}
+
+/// Turn a `label` into everything a move-flow command needs: resolve the
+/// bound game, confirm this build's `contract_wasm` derives the same
+/// contract id the delegate recorded at bind time, then GET and project the
+/// current state.
+async fn open_game<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<OpenGame> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let side = game.side.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+
+    Ok(OpenGame {
+        params,
+        game_id,
+        container,
+        contract,
+        side,
+        state,
+        status,
+    })
+}
+
 /// Ask the delegate to sign `body`, submit it as a one-record delta, and
 /// return the freshly projected [`Status`].
 ///
@@ -287,13 +339,8 @@ pub async fn show_label<N: NodeClient>(
     label: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game.params.expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    expected_container(contract_wasm, &params, contract)?;
-
-    let state = fetch_state(node, contract).await?;
-    Ok(project(&state, &params))
+    let g = open_game(node, label, contract_wasm).await?;
+    Ok(g.status)
 }
 
 /// Play `uci` for `label`.
@@ -312,41 +359,31 @@ pub async fn play_move<N: NodeClient>(
     uci: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game
-        .params
-        .clone()
-        .expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    let game_id = game.game_id.expect("bound_game checked this is Some");
-    let side = game.side.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
+    let g = open_game(node, label, contract_wasm).await?;
 
-    let state = fetch_state(node, contract).await?;
-    let status = project(&state, &params);
-
-    if status.is_over() {
+    if g.status.is_over() {
         bail!("the game is already over");
     }
-    if Side::from(status.turn) != side {
+    if Side::from(g.status.turn) != g.side {
         bail!("it is not your turn");
     }
-    if !legal_moves(&state, &params).iter().any(|m| m == uci) {
+    if !legal_moves(&g.state, &g.params).iter().any(|m| m == uci) {
         bail!("{uci} is not a legal move in the current position");
     }
 
-    let parent = status
+    let parent = g
+        .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| params.genesis());
+        .unwrap_or_else(|| g.params.genesis());
     let body = Body::Move {
-        ply: status.ply + 1,
+        ply: g.status.ply + 1,
         parent,
         uci: uci.to_string(),
     };
 
-    sign_and_submit(node, game_id, container, &params, contract, body).await
+    sign_and_submit(node, g.game_id, g.container, &g.params, g.contract, body).await
 }
 
 /// Resign `label`. Unconditional and position-independent (see
@@ -357,22 +394,20 @@ pub async fn resign<N: NodeClient>(
     label: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game
-        .params
-        .clone()
-        .expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    let game_id = game.game_id.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
-
-    let state = fetch_state(node, contract).await?;
-    let status = project(&state, &params);
-    if status.is_over() {
+    let g = open_game(node, label, contract_wasm).await?;
+    if g.status.is_over() {
         bail!("the game is already over");
     }
 
-    sign_and_submit(node, game_id, container, &params, contract, Body::Resign).await
+    sign_and_submit(
+        node,
+        g.game_id,
+        g.container,
+        &g.params,
+        g.contract,
+        Body::Resign,
+    )
+    .await
 }
 
 /// Offer a draw in `label`, anchored to the current head so it implicitly
@@ -382,32 +417,23 @@ pub async fn draw_offer<N: NodeClient>(
     label: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game
-        .params
-        .clone()
-        .expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    let game_id = game.game_id.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
-
-    let state = fetch_state(node, contract).await?;
-    let status = project(&state, &params);
-    if status.is_over() {
+    let g = open_game(node, label, contract_wasm).await?;
+    if g.status.is_over() {
         bail!("the game is already over");
     }
-    let at = status
+    let at = g
+        .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| params.genesis());
+        .unwrap_or_else(|| g.params.genesis());
 
     sign_and_submit(
         node,
-        game_id,
-        container,
-        &params,
-        contract,
+        g.game_id,
+        g.container,
+        &g.params,
+        g.contract,
         Body::DrawOffer { at },
     )
     .await
@@ -421,44 +447,35 @@ pub async fn draw_accept<N: NodeClient>(
     label: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game
-        .params
-        .clone()
-        .expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    let game_id = game.game_id.expect("bound_game checked this is Some");
-    let side = game.side.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
-
-    let state = fetch_state(node, contract).await?;
-    let status = project(&state, &params);
-    if status.is_over() {
+    let g = open_game(node, label, contract_wasm).await?;
+    if g.status.is_over() {
         bail!("the game is already over");
     }
-    let head = status
+    let head = g
+        .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| params.genesis());
-    let our_color: Color = side.into();
+        .unwrap_or_else(|| g.params.genesis());
+    let our_color: Color = g.side.into();
 
-    let offer = state
+    let offer = g
+        .state
         .records
         .iter()
         .find(|(_, rec)| {
             matches!(&rec.body, Body::DrawOffer { at } if *at == head)
-                && rec.color(&params) == Some(!our_color)
+                && rec.color(&g.params) == Some(!our_color)
         })
         .map(|(id, _)| *id)
         .ok_or_else(|| anyhow::anyhow!("no live draw offer from your opponent to accept"))?;
 
     sign_and_submit(
         node,
-        game_id,
-        container,
-        &params,
-        contract,
+        g.game_id,
+        g.container,
+        &g.params,
+        g.contract,
         Body::DrawAccept { offer },
     )
     .await
@@ -480,26 +497,16 @@ pub async fn sign_move_at_ply<N: NodeClient>(
     uci: &str,
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
-    let game = bound_game(node, label).await?;
-    let params = game
-        .params
-        .clone()
-        .expect("bound_game checked this is Some");
-    let contract = game.contract.expect("bound_game checked this is Some");
-    let game_id = game.game_id.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
-
-    let state = fetch_state(node, contract).await?;
-    let status = project(&state, &params);
+    let g = open_game(node, label, contract_wasm).await?;
 
     // The parent for `ply` is whatever record precedes it in the chain, NOT
     // necessarily the current head: a double-sign attempt at an
     // already-signed ply must reuse that ply's original parent, not the
     // chain's head after it advanced past it.
     let parent = if ply <= 1 {
-        params.genesis()
+        g.params.genesis()
     } else {
-        *status
+        *g.status
             .chain
             .get(ply as usize - 2)
             .ok_or_else(|| anyhow::anyhow!("no record at ply {} to parent ply {ply} on", ply - 1))?
@@ -510,7 +517,7 @@ pub async fn sign_move_at_ply<N: NodeClient>(
         uci: uci.to_string(),
     };
 
-    sign_and_submit(node, game_id, container, &params, contract, body)
+    sign_and_submit(node, g.game_id, g.container, &g.params, g.contract, body)
         .await
         .with_context(|| format!("sign move at ply {ply}"))
 }
