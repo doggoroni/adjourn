@@ -55,10 +55,6 @@ use ed25519_dalek::SigningKey;
 
 const CONTRACT: [u8; 32] = [5u8; 32];
 
-fn no_state(_: &[u8; 32]) -> Option<Vec<u8>> {
-    None
-}
-
 /// The delegate's dispatch has never run outside WASM before. This is the
 /// first test of the handlers themselves rather than the policy beneath them.
 #[test]
@@ -67,7 +63,6 @@ fn a_key_can_be_created_and_listed() {
 
     let resp = handle(
         &mut store,
-        no_state,
         None,
         Request::CreateGameKey {
             label: "alice".into(),
@@ -82,7 +77,7 @@ fn a_key_can_be_created_and_listed() {
     // caller's contribution is all there is. Degraded is the honest answer.
     assert_eq!(entropy, EntropyQuality::Degraded);
 
-    let Response::Games(games) = handle(&mut store, no_state, None, Request::ListGames) else {
+    let Response::Games(games) = handle(&mut store, None, Request::ListGames) else {
         panic!("expected a list");
     };
     assert_eq!(games.len(), 1);
@@ -97,7 +92,6 @@ fn creating_a_key_with_no_entropy_at_all_is_refused() {
     let mut store = MemoryStore::default();
     let resp = handle(
         &mut store,
-        no_state,
         None,
         Request::CreateGameKey {
             label: "alice".into(),
@@ -115,11 +109,11 @@ fn the_same_label_cannot_be_created_twice() {
         caller_entropy: Some([9u8; 32]),
     };
     assert!(matches!(
-        handle(&mut store, no_state, None, req()),
+        handle(&mut store, None, req()),
         Response::GameKey { .. }
     ));
     assert!(matches!(
-        handle(&mut store, no_state, None, req()),
+        handle(&mut store, None, req()),
         Response::Refused(Refusal::LabelExists)
     ));
 }
@@ -134,7 +128,6 @@ fn the_dispatch_path_refuses_a_double_sign() {
 
     let Response::GameKey { public_key, .. } = handle(
         &mut store,
-        no_state,
         None,
         Request::CreateGameKey {
             label: "white".into(),
@@ -153,7 +146,6 @@ fn the_dispatch_path_refuses_a_double_sign() {
 
     let Response::Bound { game_id } = handle(
         &mut store,
-        no_state,
         None,
         Request::BindGame {
             label: "white".into(),
@@ -174,17 +166,59 @@ fn the_dispatch_path_refuses_a_double_sign() {
     };
 
     assert!(matches!(
-        handle(&mut store, no_state, None, mv("e2e4")),
+        handle(&mut store, None, mv("e2e4")),
         Response::Signed { .. }
     ));
     // Identical retry: allowed, because a dropped response must not wedge the game.
     assert!(matches!(
-        handle(&mut store, no_state, None, mv("e2e4")),
+        handle(&mut store, None, mv("e2e4")),
         Response::Signed { .. }
     ));
     // A DIFFERENT move at the same ply: the fraud proof. Refused.
     assert!(matches!(
-        handle(&mut store, no_state, None, mv("d2d4")),
+        handle(&mut store, None, mv("d2d4")),
         Response::Refused(Refusal::PlyAlreadySigned { ply: 1 })
+    ));
+}
+
+/// A label belongs to whoever created it. `CreateGameKey` under one origin,
+/// then `BindGame` for that label under a DIFFERENT origin (here, `None` --
+/// as reachable from a second, loopback caller that lifted the public key out
+/// of a publicly exchanged invite blob) must be refused, not silently bind
+/// the attacker's origin as the owner.
+#[test]
+fn binding_a_label_under_a_different_origin_than_created_it_is_refused() {
+    let mut store = MemoryStore::default();
+    let owner = Some([1u8; 32]);
+
+    let Response::GameKey { public_key, .. } = handle(
+        &mut store,
+        owner,
+        Request::CreateGameKey {
+            label: "game1".into(),
+            caller_entropy: Some([9u8; 32]),
+        },
+    ) else {
+        panic!("expected a key");
+    };
+
+    let b = SigningKey::from_bytes(&[2u8; 32]);
+    let params = GameParams {
+        white: public_key,
+        black: b.verifying_key().to_bytes(),
+        nonce: [7u8; 16],
+    };
+
+    assert!(matches!(
+        handle(
+            &mut store,
+            None,
+            Request::BindGame {
+                label: "game1".into(),
+                params,
+                contract: CONTRACT,
+            },
+        ),
+        Response::Refused(Refusal::WrongOrigin)
     ));
 }

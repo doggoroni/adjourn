@@ -31,6 +31,10 @@ pub trait SecretStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn set(&mut self, key: &[u8], value: &[u8]) -> bool;
     fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>>;
+
+    /// Best-effort read of a contract's local state. `None` is a legitimate
+    /// answer — the node may simply not hold this contract.
+    fn contract_state(&self, id: &[u8; 32]) -> Option<Vec<u8>>;
 }
 
 impl SecretStore for DelegateCtx {
@@ -42,6 +46,9 @@ impl SecretStore for DelegateCtx {
     }
     fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
         self.list_secrets(prefix)
+    }
+    fn contract_state(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.get_contract_state(id)
     }
 }
 
@@ -63,6 +70,13 @@ impl SecretStore for MemoryStore {
             .filter(|k| k.starts_with(prefix))
             .cloned()
             .collect()
+    }
+    fn contract_state(&self, _id: &[u8; 32]) -> Option<Vec<u8>> {
+        // `MemoryStore` holds delegate secrets only, never contract state.
+        // The CLI's `FakeNode` needs a real answer here and supplies its own
+        // store type that wraps this one with a `World` handle -- see
+        // `cli/src/fake.rs`.
+        None
     }
 }
 

@@ -7,7 +7,7 @@ Untimed correspondence chess as a Freenet decentralized app.
 | `common/` (`adjourn-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
 | `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
-| `cli/` (`adjourn-cli`) | the `adjourn` headless CLI. Loads the compiled contract and delegate WASM off disk, speaks the node's WebSocket API, and drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`. Every flow that touches the delegate or contract lives in `adjourn_cli::session` and is exercised there against `FakeNode`; `main.rs` is parse-dispatch-render only. |
+| `cli/` (`adjourn-cli`) | the `adjourn` headless CLI. Loads the compiled contract and delegate WASM off disk, speaks the node's WebSocket API, and drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`. Nearly every flow that touches the delegate or contract lives in `adjourn_cli::session` and is exercised there against `FakeNode`; the one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently). Otherwise `main.rs` is parse-dispatch-render only. |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -352,25 +352,41 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 76 tests: 59 in `adjourn-core` (31 algebra
-tests plus 28 delegate-policy tests), 13 contract tests, and 4 delegate adapter
-tests. The algebra tests are the point; they run randomized partitions and
-delivery orders. Keep them green. New state-shape features need a
-corresponding law test, not just a happy-path test.
+`cargo test --workspace --locked` — 108 tests: 73 in `adjourn-core` (16 algebra
+tests, 19 adversarial tests, and 38 delegate-policy tests), 14 contract tests,
+9 delegate adapter tests, and 12 CLI integration tests. The algebra tests are
+the point; they run randomized partitions and delivery orders. Keep them
+green. New state-shape features need a corresponding law test, not just a
+happy-path test.
 
-- `common/tests/algebra.rs` (12) — the monoid laws and the original
+- `common/tests/algebra.rs` (16) — the monoid laws and the original
   adversarial cases.
 - `common/tests/adversarial.rs` (19) — convergence attacks, outcome
   precedence, and the chess edges (promotion, underpromotion, castling
   notation, en passant, repetition).
-- `common/tests/delegate_policy.rs` (28) — the delegate's pure decision
+- `common/tests/delegate_policy.rs` (38) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
-  ply-0 sentinel guard. Runs on any platform.
-- `contracts/adjourn-contract/tests/interface.rs` (13) — the adapter: byte
+  ply-0 sentinel guard, and wire round-trips for `Request`/`Response`/
+  `GameRecord`/`GameSummary` through CBOR. Runs on any platform.
+- `contracts/adjourn-contract/tests/interface.rs` (14) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
-- `delegates/adjourn-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
-  key namespaces never collide.
+- `delegates/adjourn-delegate/tests/adapter.rs` (9) — CI-only. Two groups:
+  the secret-store key namespaces never collide (and a crafted label cannot
+  forge another namespace's prefix), plus dispatch tests that drive
+  `adjourn_delegate::handle` directly — a key created and listed, a label
+  hijack attempt from a different origin refused as `WrongOrigin`, and a
+  double-sign attempt refused through the real dispatch path, not just the
+  policy layer beneath it.
+- `cli/tests/` (12, across `fake_node.rs`, `full_game.rs`, `invite.rs`,
+  `moves.rs`, `setup.rs`) — the CLI's `session.rs` flows run against
+  `FakeNode` (real contract and delegate code, in-memory transport): both
+  players deriving the same contract, a build mismatch refused loudly, a
+  full scholar's-mate game end to end, out-of-turn moves failing before
+  signing, and a double-sign attempt refused by the delegate. Several of
+  these read the compiled contract WASM off disk and skip themselves if it
+  is absent locally -- but panic instead if `CI` is set, so a skip can never
+  masquerade as a pass in CI (see `cli/tests/common/mod.rs::contract_wasm`).
 
 ### Check against the network's own verifier
 

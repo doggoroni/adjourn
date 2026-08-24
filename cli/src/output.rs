@@ -52,11 +52,19 @@ pub fn report_error(err: &anyhow::Error) -> ExitCode {
 /// precondition failure, not evidence the node's transport misbehaved, and
 /// an `io::Error` reaching the node layer at all arrives already wrapped in
 /// `tokio_tungstenite::tungstenite::Error`, which this function does catch.
+///
+/// A `RESPONSE_TIMEOUT` elapsing (`cli/src/node.rs::recv_timeout`) belongs in
+/// this bucket too: a node that accepted the connection but never answers is
+/// exactly the same class of failure as one that dropped the socket outright
+/// -- the node/delegate never got far enough to decline the request. That
+/// error is a plain `anyhow!(...)` string, so it is matched by message rather
+/// than by type.
 fn is_transport_failure(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause.is::<freenet_stdlib::client_api::Error>()
             || cause.is::<freenet_stdlib::client_api::ClientError>()
             || cause.is::<tokio_tungstenite::tungstenite::Error>()
+            || cause.to_string().starts_with("timed out after ")
     })
 }
 

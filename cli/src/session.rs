@@ -490,6 +490,7 @@ pub async fn draw_accept<N: NodeClient>(
 /// attempt straight at the delegate, proving that the delegate's own
 /// monotonic ply counter refuses it, rather than the refusal being masked by
 /// this client's own guard.
+#[doc(hidden)]
 pub async fn sign_move_at_ply<N: NodeClient>(
     node: &mut N,
     label: &str,

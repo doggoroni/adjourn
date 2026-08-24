@@ -61,16 +61,18 @@ fn handle_create_game_key<S: SecretStore>(
     if ciborium::into_writer(&quality, &mut quality_buf).is_err() {
         return Response::Refused(Refusal::StoreFailed);
     }
-    if !store.set(&secrets::key_secret(&label), &seed)
-        || !store.set(&secrets::quality_secret(&label), &quality_buf)
-    {
+    // One `&&` chain: if the owner write failed after the key/quality writes
+    // landed, a retry would find `LabelExists` above but the label would have
+    // no recorded owner -- exactly the state `handle_bind_game`'s `WrongOrigin`
+    // guard cannot reclaim (a `None`-origin caller would look like the
+    // rightful owner and could bind out from under the real creator). Fold
+    // the owner write in so a failure anywhere in the chain leaves nothing
+    // behind at all.
+    let ok = store.set(&secrets::key_secret(&label), &seed)
+        && store.set(&secrets::quality_secret(&label), &quality_buf)
+        && origin.is_none_or(|origin_id| store.set(&secrets::owner_secret(&label), &origin_id));
+    if !ok {
         return Response::Refused(Refusal::StoreFailed);
-    }
-    // Only store owner when origin is Some.
-    if let Some(origin_id) = origin {
-        if !store.set(&secrets::owner_secret(&label), &origin_id) {
-            return Response::Refused(Refusal::StoreFailed);
-        }
     }
     Response::GameKey {
         label,
@@ -89,6 +91,15 @@ fn handle_bind_game<S: SecretStore>(
     let Some(seed) = secrets::load_seed(store, &label) else {
         return Response::Refused(Refusal::UnknownLabel);
     };
+
+    // A label belongs to whoever created it. Without this, any caller that can
+    // reach the delegate could bind someone else's label using a public key
+    // lifted from the invite blob, and thereafter be the only party able to
+    // sign for it.
+    if secrets::load_owner(store, &label) != origin {
+        return Response::Refused(Refusal::WrongOrigin);
+    }
+
     let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
 
     let existing =
@@ -135,8 +146,8 @@ fn handle_bind_game<S: SecretStore>(
 /// it does not decode — and the signature is granted anyway. The monotonic ply
 /// counter in `decide_sign` is the actual guarantee; requiring state here would
 /// let a cold cache lock a player out of their own game.
-fn locally_known_to_be_illegal<F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
-    get_state: F,
+fn locally_known_to_be_illegal<S: SecretStore>(
+    store: &S,
     record: &adjourn_core::delegate_policy::GameRecord,
     body: &Body,
 ) -> bool {
@@ -145,7 +156,7 @@ fn locally_known_to_be_illegal<F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
     };
     // `record.contract`, NOT `record.game_id()`: a contract instance id is
     // hash(code, params) and is a different value from our game id.
-    let Some(bytes) = get_state(&record.contract) else {
+    let Some(bytes) = store.contract_state(&record.contract) else {
         return false;
     };
     let Some(state) = GameState::decode(&bytes) else {
@@ -165,9 +176,8 @@ fn locally_known_to_be_illegal<F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
         .any(|m| m == uci)
 }
 
-fn handle_sign<S: SecretStore, F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
+fn handle_sign<S: SecretStore>(
     store: &mut S,
-    get_state: F,
     origin: Option<[u8; 32]>,
     game_id: [u8; 32],
     body: Body,
@@ -179,7 +189,7 @@ fn handle_sign<S: SecretStore, F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
         return Response::Refused(Refusal::UnknownLabel);
     };
 
-    if locally_known_to_be_illegal(get_state, &record, &body) {
+    if locally_known_to_be_illegal(store, &record, &body) {
         return Response::Refused(Refusal::IllegalMove);
     }
 
@@ -244,9 +254,8 @@ fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Res
 
 /// Public so the CLI's in-memory `FakeNode` can drive the REAL dispatch code
 /// rather than a reimplementation of it.
-pub fn handle<S: SecretStore, F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
+pub fn handle<S: SecretStore>(
     store: &mut S,
-    get_state: F,
     origin: Option<[u8; 32]>,
     request: Request,
 ) -> Response {
@@ -260,7 +269,7 @@ pub fn handle<S: SecretStore, F: Fn(&[u8; 32]) -> Option<Vec<u8>>>(
             params,
             contract,
         } => handle_bind_game(store, origin, label, params, contract),
-        Request::Sign { game_id, body } => handle_sign(store, get_state, origin, game_id, body),
+        Request::Sign { game_id, body } => handle_sign(store, origin, game_id, body),
         Request::ListGames => handle_list_games(store, origin),
     }
 }
@@ -279,18 +288,7 @@ impl DelegateInterface for ChessDelegate {
                     Ok(r) => r,
                     Err(refusal) => return Ok(reply(Response::Refused(refusal))),
                 };
-                // The best-effort legality check (`locally_known_to_be_illegal`)
-                // needs a *read* of contract state while `store` is borrowed
-                // mutably by `handle`. `DelegateCtx` cannot currently serve as
-                // both the mutable secret store and the state reader in one
-                // call — it is a single `&mut` handle with no split borrow —
-                // so on the WASM path the check is disabled (`|_| None`)
-                // rather than silently dropped without a trace. The
-                // monotonic ply counter in `decide_sign` is still the real
-                // guarantee; this only loses the early, best-effort refusal.
-                // Revisit once `DelegateCtx` can be split into a reader and a
-                // writer.
-                Ok(reply(handle(ctx, |_| None, origin_id(origin), request)))
+                Ok(reply(handle(ctx, origin_id(origin), request)))
             }
             // `InboundDelegateMsg` is `#[non_exhaustive]`. Reject unknown
             // variants rather than panicking: a panic inside delegate WASM

@@ -1,10 +1,12 @@
 //! `adjourn`: the command-line client.
 //!
-//! Thin glue only -- every flow that touches the delegate or the contract
-//! lives in `adjourn_cli::session` and is exercised there against
-//! `FakeNode`. This file's job is: parse arguments, load the two WASM
-//! modules off disk, open one `WsClient`, dispatch to `session`, and render
-//! the result -- never re-implement a flow `session.rs` already owns.
+//! Thin glue only -- nearly every flow that touches the delegate or the
+//! contract lives in `adjourn_cli::session` and is exercised there against
+//! `FakeNode`; the one exception is `ListGames`, sent directly from
+//! `list_games` below (see its doc comment for why). This file's job is:
+//! parse arguments, load the two WASM modules off disk, open one `WsClient`,
+//! dispatch to `session`, and render the result -- never re-implement a flow
+//! `session.rs` already owns.
 //!
 //! Exit codes (see `output.rs`): `0` success, `1` refusal or precondition
 //! failure, `2` usage -- handled entirely by `clap`, which exits before

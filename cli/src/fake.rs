@@ -13,7 +13,7 @@
 
 use adjourn_contract::Contract;
 use adjourn_core::delegate_api::{Request, Response};
-use adjourn_delegate::secrets::MemoryStore;
+use adjourn_delegate::secrets::{MemoryStore, SecretStore};
 use freenet_stdlib::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -41,18 +41,54 @@ pub fn shared_world() -> World {
     Arc::new(Mutex::new(BTreeMap::new()))
 }
 
+/// A `MemoryStore` for delegate secrets, paired with a handle to the shared
+/// contract `World` so `SecretStore::contract_state` can answer for real.
+///
+/// This is what makes the delegate's best-effort illegality check
+/// (`locally_known_to_be_illegal` in `adjourn_delegate`) exercisable through
+/// `FakeNode`: a real node's `DelegateCtx` can read local contract state, and
+/// a fake that always answered `None` here would silently stop covering that
+/// path in every CLI test.
+#[derive(Clone)]
+struct WorldBackedStore {
+    secrets: MemoryStore,
+    world: World,
+}
+
+impl SecretStore for WorldBackedStore {
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.secrets.get(key)
+    }
+    fn set(&mut self, key: &[u8], value: &[u8]) -> bool {
+        self.secrets.set(key, value)
+    }
+    fn list(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
+        self.secrets.list(prefix)
+    }
+    fn contract_state(&self, id: &[u8; 32]) -> Option<Vec<u8>> {
+        self.world
+            .lock()
+            .ok()?
+            .get(id)
+            .map(|(_, state)| state.clone())
+    }
+}
+
 /// Runs the real contract and delegate code against in-memory state, so
 /// `NodeClient` callers can be exercised without a live Freenet node.
 pub struct FakeNode {
     world: World,
-    store: MemoryStore,
+    store: WorldBackedStore,
 }
 
 impl FakeNode {
     pub fn new(world: World) -> Self {
         Self {
+            store: WorldBackedStore {
+                secrets: MemoryStore::default(),
+                world: world.clone(),
+            },
             world,
-            store: MemoryStore::default(),
         }
     }
 
@@ -117,12 +153,6 @@ impl NodeClient for FakeNode {
     }
 
     async fn delegate(&mut self, req: Request) -> anyhow::Result<Response> {
-        let world = self.world.clone();
-        Ok(adjourn_delegate::handle(
-            &mut self.store,
-            |id| world.lock().ok()?.get(id).map(|(_, state)| state.clone()),
-            None,
-            req,
-        ))
+        Ok(adjourn_delegate::handle(&mut self.store, None, req))
     }
 }

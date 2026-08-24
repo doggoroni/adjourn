@@ -1,4 +1,4 @@
-use adjourn_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
+use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
     HostEntropy, SignDecision, GAME_RECORD_FORMAT,
@@ -562,4 +562,40 @@ fn a_game_record_round_trips_through_cbor() {
             "the double-sign guard did not survive"
         );
     }
+}
+
+/// `FakeNode::delegate` (in `cli/src/fake.rs`) returns the `Response` value
+/// directly, so `Response::encode`/`decode` -- the real wire path a live node
+/// uses -- is never exercised by the CLI's own test suite. `params` and
+/// `contract` on `GameSummary` are wire format that `session::bound_game`
+/// depends on to recover `GameParams` and the contract id from a label; a
+/// silent CBOR round-trip bug in either field would only surface against a
+/// real Freenet node. Cover it here instead.
+#[test]
+fn a_game_summary_with_params_and_contract_round_trips_through_cbor() {
+    let (_w, _b, params) = game();
+    let summary = GameSummary {
+        label: "g1".into(),
+        public_key: [1u8; 32],
+        game_id: Some([2u8; 32]),
+        side: Some(Side::White),
+        last_signed_ply: 3,
+        entropy: Some(EntropyQuality::HostBacked),
+        params: Some(params.clone()),
+        contract: Some(CONTRACT),
+    };
+    let resp = Response::Games(vec![summary.clone()]);
+
+    let back = Response::decode(&resp.encode()).expect("decode");
+    assert_eq!(back, resp, "GameSummary did not survive CBOR");
+
+    let Response::Games(games) = back else {
+        panic!("expected Games");
+    };
+    assert_eq!(
+        games[0].params.as_ref().map(|p| &p.white),
+        Some(&params.white),
+        "params must survive specifically, not just round-trip by luck"
+    );
+    assert_eq!(games[0].contract, Some(CONTRACT));
 }

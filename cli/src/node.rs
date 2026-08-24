@@ -12,6 +12,13 @@ use freenet_stdlib::client_api::{
 };
 use freenet_stdlib::prelude::*;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long a single request will wait for the node's response before giving
+/// up. Without this, a node that accepts the handshake and never answers
+/// hangs the CLI forever -- no output, no exit code, nothing for a caller (or
+/// a script) to act on.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // `NodeClient` is only ever used generically (`<N: NodeClient>`), never as
 // `dyn NodeClient`, so the missing auto-trait bounds this lint warns about
@@ -81,6 +88,18 @@ impl WsClient {
         })
     }
 
+    /// `self.api.recv()`, bounded by [`RESPONSE_TIMEOUT`]. `op` names the
+    /// request this receive is waiting on, so a timeout error says what hung
+    /// rather than just that something did.
+    async fn recv_timeout(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+        match tokio::time::timeout(RESPONSE_TIMEOUT, self.api.recv()).await {
+            Ok(result) => result.map_err(anyhow::Error::from),
+            Err(_) => Err(anyhow!(
+                "timed out after {RESPONSE_TIMEOUT:?} waiting for a response to {op}"
+            )),
+        }
+    }
+
     pub async fn register_delegate(&mut self, container: DelegateContainer) -> anyhow::Result<()> {
         self.api
             .send(ClientRequest::DelegateOp(
@@ -93,7 +112,7 @@ impl WsClient {
             .await?;
         // Default cipher and nonce are accepted in local mode only.
         loop {
-            match self.api.recv().await? {
+            match self.recv_timeout("RegisterDelegate").await? {
                 HostResponse::Ok | HostResponse::DelegateResponse { .. } => return Ok(()),
                 HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
                 other => bail!("unexpected response to RegisterDelegate: {other:?}"),
@@ -117,7 +136,7 @@ impl NodeClient for WsClient {
             }))
             .await?;
         loop {
-            match self.api.recv().await? {
+            match self.recv_timeout("Get").await? {
                 HostResponse::ContractResponse(ContractResponse::GetResponse { state, .. }) => {
                     return Ok(Some(state.as_ref().to_vec()))
                 }
@@ -143,7 +162,7 @@ impl NodeClient for WsClient {
             }))
             .await?;
         loop {
-            match self.api.recv().await? {
+            match self.recv_timeout("Put").await? {
                 HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => {
                     return Ok(())
                 }
@@ -161,7 +180,7 @@ impl NodeClient for WsClient {
             }))
             .await?;
         loop {
-            match self.api.recv().await? {
+            match self.recv_timeout("Update").await? {
                 HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => {
                     return Ok(())
                 }
@@ -184,7 +203,7 @@ impl NodeClient for WsClient {
             ))
             .await?;
         loop {
-            match self.api.recv().await? {
+            match self.recv_timeout("delegate call").await? {
                 HostResponse::DelegateResponse { values, .. } => {
                     for msg in values {
                         if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
