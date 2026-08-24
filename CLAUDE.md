@@ -414,17 +414,45 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   key new` returned a key, so both modules instantiate and run under the real
   node. No unresolved-import failure, which is what `getrandom` reaching
   either dependency graph would have produced.
-- **Whether `freenet_rand` supplies real entropy is still unanswered.** The
-  CLI as shipped through Task 9 printed only the public key from `adjourn key
-  new`, never the `EntropyQuality` the delegate returned, so the one live
-  signal that would answer this was not observable. Task 10 fixes the output
-  (`key new` now prints `entropy: HostBacked`/`Degraded` alongside the key,
-  and `Degraded` also prints a warning; `game list` carries the same field per
-  game) — the value itself has not yet been re-observed against a live node.
-  Do not guess it here; record it once it has actually been read off a run.
-- **A node started with plain `nohup` does not survive the shell.**
-  `setsid nohup freenet local ... < /dev/null &` does; see
-  `docs/runbook-two-nodes.md`.
+- **`freenet_rand` IS provided and supplies real entropy, on this node
+  version.** After the Task 10 output fix, `adjourn key new` was re-run
+  against the same live node:
+
+  ```
+  $ adjourn key new --label entropy-probe
+  entropy-probe: 9ZVkjHbpdPvKkvrfwJCbLC2JrPtVwhWQaGmBAdBW6KKd  entropy: HostBacked
+
+  $ adjourn game list
+  bob  Black  contract FMyx3cuVMktTLPmw9mcQFyD46bqxMJbKWkddTRLPa6bz  last signed ply 0  host-backed entropy
+  ```
+
+  `HostBacked` means `classify_host_entropy`'s two-draw liveness check (see
+  "Delegate" above) saw two different, non-zero draws from the host import —
+  so `freenet_rand` both resolves and returns genuine randomness, rather than
+  the all-zeros a dead source would produce.
+
+  This is the difference between the two security properties the design
+  distinguishes for a freshly generated per-game key:
+  - **`HostBacked`** — the key is unpredictable even to a UI that is hostile
+    at the moment of creation. The strong property, and the one that holds
+    here.
+  - **`Degraded`** (had it come back this way) — the key is derived solely
+    from caller-supplied entropy, so a caller that retained its own
+    contribution could recompute the private key. Safe only against a UI
+    compromised *later*, not at creation time.
+
+  The `Degraded` path and its warning stay exactly as written: it is a real
+  fallback for a node/host that behaves differently, and the fail-closed
+  branch (no host entropy *and* no caller entropy) is what stops a key ever
+  being minted from nothing. This result is one measurement, on one node
+  version, on one date — `freenet 0.2.130`, 2026-08-24 — not a guarantee
+  about every node version. That is why it is recorded with both attached
+  rather than asserted as a permanent property of the platform.
+- **A node started with plain `nohup` does not survive the shell; `setsid
+  nohup ... < /dev/null &` does.** Confirmed twice now: once when the bind
+  went through in the first live run, and again when a node started this way
+  in an earlier session was found still running after the session that
+  started it had ended. See `docs/runbook-two-nodes.md`.
 
 ## Roadmap
 
