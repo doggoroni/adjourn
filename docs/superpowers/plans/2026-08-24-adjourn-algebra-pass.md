@@ -1063,23 +1063,32 @@ git commit -m "feat(core): DrawClaim projection, claim precedence, precise Statu
 
 - [ ] **Step 1: Write the failing test**
 
-In `cli/tests/moves.rs`, following the file's existing `FakeNode` setup style:
+In `cli/tests/moves.rs`. The file already has an `async fn setup() ->
+Option<(FakeNode, FakeNode, Vec<u8>)>` helper that builds two bound `FakeNode`s;
+it returns `None` when the contract WASM is not on disk, and every test in the
+file skips on that with the `else { return eprintln!(...) }` form. Follow that
+shape exactly — do not invent a new helper:
 
 ```rust
+/// A groundless claim is refused locally. A claim with no valid ground is
+/// ignored at projection anyway, so signing one would only add a dead record
+/// to state.
 #[tokio::test]
 async fn draw_claim_refuses_when_there_is_no_ground_to_claim() {
-    // A fresh game has no repetition and no fifty-move clock, so the claim
-    // must be refused locally rather than burning a record on the network.
-    let (mut node, label) = setup_game().await;
-    let err = adjourn_cli::session::draw_claim(&mut node, &label, contract_wasm())
+    let Some((mut alice, _bob, wasm)) = setup().await else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+
+    let err = draw_claim(&mut alice, "alice", wasm)
         .await
-        .expect_err("a groundless claim must be refused");
-    assert!(
-        err.to_string().contains("no draw to claim"),
-        "unexpected error: {err}"
-    );
+        .expect_err("a fresh game has nothing to claim");
+    let text = format!("{err:#}").to_lowercase();
+    assert!(text.contains("no draw to claim"), "got: {err:#}");
 }
 ```
+
+Add `draw_claim` to the existing `use adjourn_cli::session::{...}` import list
+at the top of the file.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1153,15 +1162,19 @@ Then add the dispatch arm immediately after the `DrawCommand::Accept` arm at
 line 322, mirroring its shape exactly — same client construction, same
 contract-WASM load, same renderer for the returned `Status`:
 
+Copy the body of the `DrawCommand::Accept` arm verbatim and change only the
+session call. Note that `output::render_status` takes **two** arguments —
+`(label: &str, status: &Status)` — so the label is passed through:
+
 ```rust
         Command::Draw(DrawCommand::Claim { label }) => {
             let status = session::draw_claim(&mut client, &label, contract_wasm()?).await?;
-            output::render_status(&status);
+            output::render_status(&label, &status);
         }
 ```
 
 If the surrounding arms name things differently (a different client binding, a
-different renderer), follow **their** names rather than these — the point is
+different WASM loader), follow **their** names rather than these — the point is
 that `Claim` is indistinguishable in shape from `Accept`.
 
 - [ ] **Step 5: Run the test to verify it passes**
