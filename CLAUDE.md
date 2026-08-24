@@ -91,13 +91,19 @@ These look like bugs. They are not.
    players. Test: `moves_do_not_replay_across_games`.
 
 7. **Outcome precedence is fixed and documented:**
-   forfeit > **resignation** > board result > draw agreement. Any fixed order
-   works; it just has to be identical on every peer. Resignation sits above the
-   board result because `Resign` is unanchored and unconditional — it names no
-   position, so there is no ply at which it stops applying. Ranking the board
-   first let a player resign and then play on to a mate, and be awarded the win
-   by their own resigned game. Test:
+   forfeit > **resignation** > board result > **draw claim** > draw agreement.
+   Any fixed order works; it just has to be identical on every peer.
+   Resignation sits above the board result because `Resign` is unanchored and
+   unconditional — it names no position, so there is no ply at which it stops
+   applying. Ranking the board first let a player resign and then play on to a
+   mate, and be awarded the win by their own resigned game. Test:
    `resignation_outranks_a_later_board_result`.
+
+   The board result outranks a draw claim because the claimant is by definition
+   the player to move — so if that position is checkmate, the claimant is the
+   player who has just been mated. Ranking the claim first would let a mated
+   player draw their way out of a loss. Tests: `a_claim_does_not_disturb_a_checkmate`,
+   `a_valid_claim_outranks_a_pending_draw_agreement`.
 
 8. **One move has exactly one spelling.**
    shakmaty accepts both `e1g1` and `e1h1` for the same castling move. Two
@@ -120,6 +126,15 @@ These look like bugs. They are not.
    `stale_draw_offer_is_ignored`, `draw_offer_at_the_current_head_is_accepted`,
    `accepting_and_then_moving_voids_your_own_acceptance`.
 
+10. **The eviction group key includes the record's `kind`.**
+    Merge keeps only the K smallest ids per `(signer, kind, ply)` group. Were
+    kind left out, a player could flood `DrawOffer` records at ply N and evict
+    their own `Move` records at ply N — including both halves of a double-sign
+    fraud proof. Grouping per *signer* is what makes eviction safe against an
+    opponent: your records only ever compete with your own. Tests:
+    `flooding_draw_offers_cannot_evict_a_move_at_the_same_ply`,
+    `a_spammer_cannot_evict_the_opponents_records`.
+
 ## Persisted-record versioning
 
 The network encoding needs no version field: the contract key is
@@ -132,7 +147,7 @@ The delegate's secret store is the opposite case. `RegisterDelegate` carries a
 `predecessors` list and the node copies LOCAL-scope secrets forward into the new
 generation's namespace, so a future delegate **will** read records this one
 wrote. `GameRecord` therefore carries `format: u8` (`GAME_RECORD_FORMAT`,
-currently 1), checked at the top of both `decide_bind` and `decide_sign` before
+currently 2), checked at the top of both `decide_bind` and `decide_sign` before
 any other field is trusted.
 
 The failure being defended against is a decode *success*, not a decode error: a
@@ -154,8 +169,10 @@ once a game exists on the network.
 | `Record.body` / `.signer` / `.sig` | `b` / `k` / `s` |
 | `Body::Move` / `Resign` / `DrawOffer` / `DrawAccept` | `m` / `r` / `o` / `a` |
 | `Move.ply` / `.parent` / `.uci` | `p` / `t` / `u` |
-| `DrawOffer.at` | `t` |
-| `DrawAccept.offer` | `o` |
+| `DrawOffer.ply` / `.at` | `p` / `t` |
+| `DrawAccept.ply` / `.offer` | `p` / `o` |
+| `Body::DrawClaim` | `c` |
+| `DrawClaim.ply` / `.at` | `p` / `t` |
 
 `GameState` is a **sequence** of records, not a map — the id is recomputed on
 decode. Decode **rejects duplicate ids**: an honestly-serialized state cannot
@@ -184,21 +201,41 @@ pure function of the result set.
 
 ## Known issues, unresolved
 
-- **Unbounded state growth.** A player can sign unlimited structurally-valid
-  but illegal move records. Bounded by the two keys, but nothing caps it. Any
-  eviction rule must be a pure function of the merged set.
+- **State growth: bounded, at a cost.** Merge keeps the K smallest ids per
+  `(signer, kind, ply)` group — K=2 for moves, K=1 for draw records — and
+  `MAX_PLY = 4096` bounds the number of groups. Worst case is ~41,000 records
+  or ~6.4 MB, against a normal game's 1100 bytes. Top-K distributes over merge
+  (`topK(topK(A) ∪ topK(B)) = topK(A ∪ B)`), so the rule is idempotent and the
+  monoid survives.
 
-  The rule that works is **top-K by id within each `(signer, ply)` group**. The
-  K smallest ids of `A ∪ B` are always a subset of (K smallest of A) ∪ (K
-  smallest of B), so filtering distributes over merge and the rule is
-  idempotent. K=2 preserves the double-sign fraud proof. Grouping *per signer*
-  is what makes it safe: your own move only ever competes with your own
-  records, so an opponent cannot evict your move, and a player who spams
-  themselves out of a legal move merely stalls their own game.
+  A ply-window rule ("drop moves beyond chain length + 1") is still **not**
+  safe: chain length is shorter in a partial state, so a peer would evict
+  records the merged state needs.
 
-  A ply-window rule ("drop moves beyond chain length + 1") is **not** safe:
-  chain length is shorter in a partial state, so a peer would evict records the
-  merged state needs. `filter(A) ∪ filter(B) ≠ filter(A ∪ B)`. Divergence.
+- **Eviction gives any player an unconditional way to void a game.** Eviction
+  must sort blind by id: legality depends on the position, which depends on
+  the chain, which depends on which records are present, so a legality-aware
+  rule would evict different records in a partial state and peers would
+  diverge. But blind-by-id cuts both ways. A player who has already played a
+  ply can sign two lower-id junk `Move` records at that same ply — no
+  cheating required, no double-sign involved — and their own real move falls
+  out of the top-K. The chain stops one ply short and the game ends with no
+  result. This is not a narrow loophole for a cheater dodging a forfeit; it is
+  available to either player, at any ply, at will, and no value of K prevents
+  it — the only rule that would is legality-aware, which is exactly the
+  divergence trap above.
+
+  The double-sign forfeit inherits the same hole: bury the second signature
+  under lower-id illegal records at that ply and `walk` finds no forfeit
+  candidate either, just a stalled chain.
+
+  The trade is accepted because nothing new is gained by it: the outcome is a
+  stalled game with no decision, which is what walking away already produces.
+  No win is ever stolen — at worst a loss becomes a no-result. A
+  witness-published fraud proof embedding both offending records would close
+  the double-sign case, but defining fraud without reference to a position
+  collides with invariant 8's castling case. Test:
+  `a_buried_double_sign_stalls_instead_of_forfeiting`.
 
 - **The outcome is not monotone.** A strict superset can move the projection
   *down*: a decided game plus one extra record (a late-published double-sign
@@ -210,18 +247,22 @@ pure function of the result set.
   truncated `fen` after a forfeit.
   Test: `superset_reverses_the_outcome_and_rewinds_the_board`.
 
-- **Threefold and fifty-move are reported, not forced.** FIDE makes these a
-  *claim* (9.2, 9.3), and there is no claim record type. `Status.repetitions`
-  and `Status.halfmove_clock` expose them so a UI can offer the claim; the
-  automatic rules (fivefold 9.6.1, seventy-five-move 9.6.2) fire in `walk` and
-  do end the game. Adding a `DrawClaim` body is a live design question.
+- **Threefold and fifty-move are claims, and `DrawClaim` is how they are
+  made.** FIDE makes these a *claim* (9.2, 9.3), not an automatic result.
+  `Status.repetitions` and `Status.halfmove_clock` expose the grounds, and a
+  `DrawClaim` record anchored to the head cashes them. The claim carries no
+  kind: projection knows the repetition count and halfmove clock at the head,
+  so it checks whether either ground holds and reports which fired. Only the
+  player to move may claim — letting the idle player claim would let the player
+  to move void it by moving, which is the race that anchoring to the head
+  exists to avoid. The automatic rules (fivefold 9.6.1, seventy-five-move
+  9.6.2) still fire in `walk` and end the game with no claim needed. Tests:
+  `a_threefold_claim_at_the_head_draws_the_game`, `a_stale_claim_is_ignored`,
+  `only_the_player_to_move_may_claim`.
 
 - **The 75-move threshold has no end-to-end test.** The rule is implemented in
   `walk` next to the fivefold check, but a 150-halfmove line that avoids
   fivefold first is awkward to construct by hand. Fivefold is covered.
-
-- **`Status.ignored` is imprecise** — it's `len - chain.len()`, so it counts
-  resign/draw records as "ignored".
 
 - **CBOR encoding: done.** A 7-record game is 1100 bytes (157 a record), down
   from 2494 (356). Three changes got there, all breaking, all landed in one
@@ -241,10 +282,6 @@ pure function of the result set.
   loses history. Now that `walk` tracks repetitions, this also means
   `make_move` cannot see them — it relies on `project` having already decided
   the game is over. Consider returning the `Chess` from `project` instead.
-
-- **`ply: u16` overflows.** `walk` does `ply += 1` with no bound; debug builds
-  panic at 65535. Unreachable in practice now that the automatic draw rules
-  terminate games, but there is still no explicit cap.
 
 - **Abandonment.** No timers means a player who stops leaves a contract that
   goes cold and gets evicted. Current answer: let it die, UI keeps a local PGN.
@@ -352,23 +389,24 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 108 tests: 73 in `adjourn-core` (16 algebra
-tests, 19 adversarial tests, and 38 delegate-policy tests), 14 contract tests,
-9 delegate adapter tests, and 12 CLI integration tests. The algebra tests are
+`cargo test --workspace --locked` — 131 tests: 93 in `adjourn-core` (23 algebra
+tests, 31 adversarial tests, and 39 delegate-policy tests), 16 contract tests,
+9 delegate adapter tests, and 13 CLI integration tests. The algebra tests are
 the point; they run randomized partitions and delivery orders. Keep them
 green. New state-shape features need a corresponding law test, not just a
 happy-path test.
 
-- `common/tests/algebra.rs` (16) — the monoid laws and the original
+- `common/tests/algebra.rs` (23) — the monoid laws and the original
   adversarial cases.
-- `common/tests/adversarial.rs` (19) — convergence attacks, outcome
+- `common/tests/adversarial.rs` (31) — convergence attacks, outcome
   precedence, and the chess edges (promotion, underpromotion, castling
-  notation, en passant, repetition).
-- `common/tests/delegate_policy.rs` (38) — the delegate's pure decision
+  notation, en passant, repetition, top-K eviction, `MAX_PLY`, and draw
+  claims).
+- `common/tests/delegate_policy.rs` (39) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
   ply-0 sentinel guard, and wire round-trips for `Request`/`Response`/
   `GameRecord`/`GameSummary` through CBOR. Runs on any platform.
-- `contracts/adjourn-contract/tests/interface.rs` (14) — the adapter: byte
+- `contracts/adjourn-contract/tests/interface.rs` (16) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
 - `delegates/adjourn-delegate/tests/adapter.rs` (9) — CI-only. Two groups:
@@ -378,8 +416,8 @@ happy-path test.
   hijack attempt from a different origin refused as `WrongOrigin`, and a
   double-sign attempt refused through the real dispatch path, not just the
   policy layer beneath it.
-- `cli/tests/` (12, across `fake_node.rs`, `full_game.rs`, `invite.rs`,
-  `moves.rs`, `setup.rs`) — the CLI's `session.rs` flows run against
+- `cli/tests/` (13, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs` 4,
+  `moves.rs` 4, `setup.rs` 2) — the CLI's `session.rs` flows run against
   `FakeNode` (real contract and delegate code, in-memory transport): both
   players deriving the same contract, a build mismatch refused loudly, a
   full scholar's-mate game end to end, out-of-turn moves failing before
@@ -403,6 +441,20 @@ skip" broadcast path could never fire. Our tests missed it because they assert
 on the DECODED delta, which really is empty; the network reads the encoded
 length. That is the same failure that drove River's 2026-07-25 incident, where
 the room contract took 63.7% of network-wide byte-weighted broadcast work.
+
+`summarize_state` and `get_state_delta` both call `filter_valid(&params)`
+before summarizing or diffing, for the same never-settles reason.
+`validate_state` is deliberately permissive (invariant 1: rejecting content is
+forbidden, since a required-valid state lets one player destroy a game by
+signing garbage), so a peer can be handed a state that is over-K — via a
+crafted PUT, or a delta assembled from fragments no single honest peer ever
+held. Without normalizing on read, that peer keeps summarizing and diffing
+against records eviction has already discarded: it re-offers the same
+evicted-away records every sync round, forever, and its counterpart never
+reports itself in sync — the identical shape as `self_delta_empty` above,
+where the network read encoded bytes the code path never produced. Both bugs
+are "the decoded value looks fine; the peer never converges because of what
+actually got compared or sent."
 
 Feed it partial and adversarial states, not just happy games -- the merge laws
 only bite when peers hold different fragments. Current status: 348 cases, 348
