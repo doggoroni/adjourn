@@ -19,6 +19,13 @@ const FIVEFOLD: u32 = 5;
 /// and no pawn move — 150 halfmoves. Fifty (9.3) is likewise only a claim.
 const SEVENTY_FIVE_MOVE_HALFMOVES: u32 = 150;
 
+/// FIDE 9.2: a player may CLAIM a draw when a position occurs a third time.
+const THREEFOLD: u32 = 3;
+
+/// FIDE 9.3: a player may CLAIM a draw after 50 moves by each player with no
+/// capture and no pawn move -- 100 halfmoves.
+const FIFTY_MOVE_HALFMOVES: u32 = 100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
     Checkmate,
@@ -33,6 +40,10 @@ pub enum Reason {
     DoubleSignForfeit,
     /// Both players resigned; no principled winner, so a draw.
     MutualResignation,
+    /// A claimed threefold repetition (FIDE 9.2).
+    ThreefoldClaim,
+    /// A claimed fifty-move draw (FIDE 9.3).
+    FiftyMoveClaim,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,8 +63,10 @@ pub struct Status {
     pub fen: String,
     /// Record ids of the accepted move chain, in order.
     pub chain: Vec<RecordId>,
-    /// Records present in state but ignored by the projection: illegal moves,
-    /// wrong-parent moves, stale draw offers. Useful for UI diagnostics.
+    /// Move records present in state but not in the accepted chain: illegal
+    /// moves, wrong-parent moves, moves past the point the chain stopped.
+    /// Resignations and draw records are statements, not ignored moves, so
+    /// they are never counted here. Useful for UI diagnostics.
     pub ignored: usize,
     /// How many times the current position has occurred, counting this one.
     /// At 3 a player may claim a draw; at [`FIVEFOLD`] it is automatic.
@@ -238,6 +251,45 @@ fn draw_agreed(state: &GameState, params: &GameParams, head: RecordId) -> bool {
     false
 }
 
+/// Is there a live, well-founded draw claim at the head?
+///
+/// Anchored to the head exactly like `DrawOffer`, which is what keeps it free
+/// of races: the claimant must be the player to move, and the player to move is
+/// the only party who can advance the head. The opponent therefore cannot void
+/// a valid claim, and a claim withheld and published later simply does nothing.
+///
+/// A claim with no valid ground is ignored, never fatal -- invariant 1 applies
+/// to claims exactly as it applies to illegal moves.
+fn draw_claimed(
+    state: &GameState,
+    params: &GameParams,
+    head: RecordId,
+    turn: Color,
+    repetitions: u32,
+    halfmoves: u32,
+) -> Option<Reason> {
+    for rec in state.records.values() {
+        let Body::DrawClaim { at, .. } = &rec.body else {
+            continue;
+        };
+        if *at != head {
+            continue; // the game moved on: this claim has expired
+        }
+        // Only the player to move may claim. Letting the idle player claim
+        // would let the player to move void it by moving -- a race.
+        if rec.color(params) != Some(turn) {
+            continue;
+        }
+        if repetitions >= THREEFOLD {
+            return Some(Reason::ThreefoldClaim);
+        }
+        if halfmoves >= FIFTY_MOVE_HALFMOVES {
+            return Some(Reason::FiftyMoveClaim);
+        }
+    }
+    None
+}
+
 fn resigned(state: &GameState, params: &GameParams) -> (bool, bool) {
     let mut white = false;
     let mut black = false;
@@ -256,7 +308,8 @@ fn resigned(state: &GameState, params: &GameParams) -> (bool, bool) {
 /// The whole game, as a function of the record set.
 ///
 /// Precedence is fixed and documented so that every peer reaches the same
-/// answer: forfeit > resignation > board result > draw agreement.
+/// answer: forfeit > resignation > board result > draw claim > draw
+/// agreement.
 ///
 /// Resignation sits ABOVE the board result because `Resign` is unanchored and
 /// unconditional — it names no position, so there is no ply at which it stops
@@ -316,26 +369,53 @@ pub fn project(state: &GameState, params: &GameParams) -> Status {
             }),
             (false, false) => board_result.or_else(|| {
                 let head = chain.last().copied().unwrap_or_else(|| params.genesis());
-                if draw_agreed(state, params, head) {
-                    Some(Decision {
-                        winner: None,
-                        reason: Reason::DrawAgreement,
-                    })
-                } else {
-                    None
-                }
+                // Board first: the claimant is by definition the player to
+                // move, so if that position is checkmate the claimant is the
+                // player who has been mated. Ranking the claim above the board
+                // would let a mated player draw their way out of a loss.
+                draw_claimed(
+                    state,
+                    params,
+                    head,
+                    pos.turn(),
+                    repetitions,
+                    pos.halfmoves(),
+                )
+                .map(|reason| Decision { winner: None, reason })
+                .or_else(|| {
+                    if draw_agreed(state, params, head) {
+                        Some(Decision {
+                            winner: None,
+                            reason: Reason::DrawAgreement,
+                        })
+                    } else {
+                        None
+                    }
+                })
             }),
         }
     };
 
     let ply = chain.len() as u16;
+
+    // Only MOVE records can be "ignored" -- illegal moves, wrong-parent moves,
+    // and moves past the point the chain stopped. A resignation or a draw
+    // record is a statement in its own right, not a move the projection
+    // skipped.
+    let in_chain: std::collections::BTreeSet<RecordId> = chain.iter().copied().collect();
+    let ignored = state
+        .records
+        .iter()
+        .filter(|(id, rec)| matches!(rec.body, Body::Move { .. }) && !in_chain.contains(*id))
+        .count();
+
     Status {
         decision,
         ply,
         turn: pos.turn(),
         halfmove_clock: pos.halfmoves(),
         fen: Fen::from_position(&pos, EnPassantMode::Legal).to_string(),
-        ignored: state.len().saturating_sub(chain.len()),
+        ignored,
         repetitions,
         chain,
     }

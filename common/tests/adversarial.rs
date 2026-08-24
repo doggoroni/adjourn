@@ -715,3 +715,167 @@ fn a_buried_double_sign_stalls_instead_of_forfeiting() {
     assert_eq!(stalled.decision, None, "the forfeit is evaded: no decision");
     assert_eq!(stalled.ply, 2, "and the chain stalls one ply short");
 }
+
+// ---------------------------------------------------------------------------
+// 4. Draw claims (FIDE 9.2, 9.3)
+// ---------------------------------------------------------------------------
+
+/// Threefold needs the SAME position three times. Knights out and back does it.
+const THREEFOLD_LINE: &[&str] = &[
+    "g1f3", "g8f6", "f3g1", "f6g8", // position 2
+    "g1f3", "g8f6", "f3g1", "f6g8", // position 3
+];
+
+#[test]
+fn a_threefold_claim_at_the_head_draws_the_game() {
+    let (state, params, w, _b) = play(THREEFOLD_LINE);
+    let status = project(&state, &params);
+    assert!(status.repetitions >= 3, "the line must actually repeat");
+    assert!(status.decision.is_none(), "threefold alone does not end the game");
+
+    // White is to move at the head, so White is the one who may claim.
+    assert_eq!(status.turn, Color::White, "this line ends with white to move");
+    let head = status.chain.last().copied().expect("head");
+    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+
+    let mut claimed = state.clone();
+    assert!(claimed.insert_verified(&claim, &params));
+    let after = project(&claimed, &params);
+    assert_eq!(
+        after.decision.map(|d| d.reason),
+        Some(Reason::ThreefoldClaim),
+        "a valid claim at the head draws"
+    );
+    assert_eq!(after.decision.and_then(|d| d.winner), None, "a claim is a draw");
+}
+
+#[test]
+fn a_claim_with_no_valid_ground_is_ignored_not_fatal() {
+    let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
+    let status = project(&state, &params);
+    let head = status.chain.last().copied().expect("head");
+    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+
+    let mut claimed = state.clone();
+    assert!(claimed.insert_verified(&claim, &params));
+    let after = project(&claimed, &params);
+    assert_eq!(after.decision, None, "no repetition, no fifty-move: ignored");
+    assert_eq!(after.ply, status.ply, "and the game is otherwise untouched");
+}
+
+#[test]
+fn a_stale_claim_is_ignored() {
+    let (state, params, w, _b) = play(THREEFOLD_LINE);
+    let status = project(&state, &params);
+    let head = status.chain.last().copied().expect("head");
+    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+
+    // The claimant moves instead of standing on the claim, advancing the head.
+    // Only the claimant can do this -- which is precisely why a claim has no
+    // race: the opponent cannot void it.
+    let mut moved = state.clone();
+    let mv = make_move(&moved, &params, &w, "e2e4").expect("legal");
+    assert!(moved.insert_verified(&mv, &params));
+    assert!(moved.insert_verified(&claim, &params));
+
+    assert_eq!(
+        project(&moved, &params).decision,
+        None,
+        "the head moved on, so the claim expired"
+    );
+}
+
+#[test]
+fn a_valid_claim_outranks_a_pending_draw_agreement() {
+    let (state, params, w, b) = play(THREEFOLD_LINE);
+    let status = project(&state, &params);
+    let head = status.chain.last().copied().expect("head");
+
+    // Black offers, white accepts -- a complete, live agreement.
+    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: status.ply, at: head });
+    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: status.ply, offer: offer.id() });
+    // White, who is to move, also claims the threefold.
+    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+
+    let mut both = state.clone();
+    for rec in [&offer, &accept, &claim] {
+        assert!(both.insert_verified(rec, &params));
+    }
+
+    // Both are draws, so the winner is the same either way -- what the
+    // precedence decides is which REASON a peer reports. Every peer must
+    // report the same one.
+    assert_eq!(
+        project(&both, &params).decision.map(|d| d.reason),
+        Some(Reason::ThreefoldClaim),
+        "claim sits above agreement in the precedence"
+    );
+}
+
+#[test]
+fn only_the_player_to_move_may_claim() {
+    let (state, params, _w, b) = play(THREEFOLD_LINE);
+    let status = project(&state, &params);
+    assert_eq!(status.turn, Color::White, "white is to move on this line");
+    let head = status.chain.last().copied().expect("head");
+
+    // Black is NOT to move, so black's claim must not count -- otherwise the
+    // player to move could void it by moving, reintroducing a race.
+    let claim = Record::sign(&b, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let mut claimed = state.clone();
+    assert!(claimed.insert_verified(&claim, &params));
+    assert_eq!(project(&claimed, &params).decision, None);
+}
+
+/// Note on what this does and does not prove. A position that is BOTH
+/// checkmate and threefold/fifty-move is impractical to construct by hand, so
+/// this asserts the weaker, still-useful property: a claim record at a
+/// checkmate head does not disturb the mate. The strict board > claim ordering
+/// is structural — `board_result.or_else(...)` short-circuits before
+/// `draw_claimed` is ever called — and is documented at that call site.
+#[test]
+fn a_claim_does_not_disturb_a_checkmate() {
+    let (state, params, _w, b) = play(SCHOLARS);
+    let status = project(&state, &params);
+    assert_eq!(
+        status.decision.map(|d| d.reason),
+        Some(Reason::Checkmate),
+        "scholar's mate ends in checkmate"
+    );
+    let head = status.chain.last().copied().expect("head");
+
+    // Black is the mated player, and therefore the player "to move".
+    let claim = Record::sign(&b, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let mut claimed = state.clone();
+    claimed.insert_verified(&claim, &params);
+
+    assert_eq!(
+        project(&claimed, &params).decision.map(|d| d.reason),
+        Some(Reason::Checkmate),
+        "a mated player cannot claim their way out of a loss"
+    );
+}
+
+#[test]
+fn ignored_counts_illegal_moves_but_not_resignations() {
+    let (state, params, w, b) = play(&["e2e4", "e7e5"]);
+    let base = project(&state, &params).ignored;
+    assert_eq!(base, 0, "a clean game ignores nothing");
+
+    // A resignation is a statement, not an ignored move.
+    let mut with_resign = state.clone();
+    assert!(with_resign.insert_verified(&Record::sign(&b, &params, Body::Resign), &params));
+    assert_eq!(
+        project(&with_resign, &params).ignored,
+        0,
+        "resignations are not ignored moves"
+    );
+
+    // A wrong-parent move IS an ignored move.
+    let mut with_junk = state.clone();
+    assert!(with_junk.insert_verified(
+        &Record::sign(&w, &params, Body::Move { ply: 3, parent: [9u8; 32], uci: "g1f3".into() }),
+        &params
+    ));
+    assert_eq!(project(&with_junk, &params).ignored, 1);
+}
