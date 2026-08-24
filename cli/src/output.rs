@@ -155,8 +155,13 @@ pub fn render_game_list(games: &[GameSummary]) {
             .contract
             .map(|c| ContractInstanceId::new(c).encode())
             .unwrap_or_default();
+        let entropy = match g.entropy {
+            Some(EntropyQuality::HostBacked) => "host-backed entropy",
+            Some(EntropyQuality::Degraded) => "DEGRADED entropy, not securely random",
+            None => "entropy unknown",
+        };
         println!(
-            "{}\t{side}\tcontract {contract}\tlast signed ply {}",
+            "{}\t{side}\tcontract {contract}\tlast signed ply {}\t{entropy}",
             g.label, g.last_signed_ply
         );
     }

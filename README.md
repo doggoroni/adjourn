@@ -98,6 +98,16 @@ and a sync summary is exactly 64 bytes per record.
 2. ~~Delegate holding the per-game signing key; UI never sees it~~ — done,
    `delegates/adjourn-delegate`.
 3. UI over the WebSocket API: `get`, `subscribe`, `update`.
+   - ~~3a. Freenet client layer~~ — done, `cli/src/node.rs` (`NodeClient`,
+     `WsClient`, `FakeNode`).
+   - ~~3b. Game session flow~~ — done, `cli/src/session.rs`, driven by the
+     `adjourn` headless CLI (`cli/`): `init`, `key`, `invite`, `game`, `move`,
+     `show`, `resign`, `draw`. `watch` is the one command still missing — it
+     needs a streaming `NodeClient` method that does not exist yet, so it
+     errors out rather than hanging; poll with `adjourn show` instead. See
+     `docs/runbook-two-nodes.md` for how to run two nodes and play a game
+     end-to-end, and `CLAUDE.md`'s "Runtime assumptions, verified" for what
+     has actually been confirmed against a live node so far.
 
 Deferred by design: timers, matchmaking, ratings.
 

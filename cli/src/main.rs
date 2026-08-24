@@ -212,13 +212,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     entropy,
                     ..
                 } => {
-                    println!("{label}: {}", bs58::encode(public_key).into_string());
+                    println!(
+                        "{label}: {}  entropy: {:?}",
+                        bs58::encode(public_key).into_string(),
+                        entropy
+                    );
                     if matches!(
                         entropy,
                         adjourn_core::delegate_api::EntropyQuality::Degraded
                     ) {
                         eprintln!(
-                            "warning: this key was generated with degraded entropy -- it is not securely random"
+                            "warning: this key was created without host randomness -- it is only as unpredictable as this CLI's own contribution, and could be recomputed by anyone who knows it"
                         );
                     }
                 }

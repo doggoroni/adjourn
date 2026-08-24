@@ -3,7 +3,7 @@
 How to play a complete correspondence game across two real `freenet` nodes on
 one machine, each acting as one player.
 
-## Status: wired, not yet verified against a live node
+## Status: wired, partially verified against a live node
 
 **Sections 1–3 (build, and starting the two nodes) work today.** Section 4
 (the `adjourn` game commands: `init`, `invite`, `game bind`, `move`, `show`,
@@ -13,12 +13,20 @@ spec left unimplemented — it needs a streaming `NodeClient` method that does
 not exist yet, so it prints an error and exits non-zero rather than hanging
 or silently doing nothing; poll with `adjourn show` instead.
 
-This host cannot link a binary (`dlltool.exe` is missing), so Task 9 was
-verified with `cargo check`/`cargo clippy -p adjourn-cli --all-targets` only
-— compiles and type-checks clean, but the commands below have **not actually
-been run**. It has been verified end-to-end only against `FakeNode`, which
-runs the real contract and delegate code but
-never touches a WebSocket or a real `freenet` process.
+Against a real `freenet 0.2.130` node on 2026-08-24: `adjourn init`
+registered the delegate, `adjourn key new` returned a key, and `adjourn
+invite accept` successfully bound a game that `adjourn game list` then
+showed — see `CLAUDE.md`, "Runtime assumptions, verified", for what that
+confirms about `MessageOrigin` and about the delegate/contract running under
+wasmtime. Playing a full game to mate through this runbook has not yet been
+recorded here; do that next and update this section with the result.
+
+This host (Windows, no linker for `dlltool.exe`, no local Freenet node)
+cannot itself run any of this — Task 9 here was verified with `cargo
+check`/`cargo clippy -p adjourn-cli --all-targets` only, plus the `FakeNode`
+test suite, which runs the real contract and delegate code but never touches
+a WebSocket or a real `freenet` process. The live-node confirmation above was
+run and reported separately, on Linux.
 
 ## 0. Prerequisites
 
@@ -100,6 +108,15 @@ Leave both running in the foreground. Each node's WebSocket API is now at:
   a shell you're about to close does not make it persistent. Keep the two
   terminals open (or run each inside `tmux`/`screen`) for the lifetime of this
   runbook.
+- **`setsid nohup freenet local ... < /dev/null &` does survive the shell.**
+  Plain `nohup freenet local & disown` is not enough — verified against a live
+  node on 2026-08-24 (see `CLAUDE.md`, "Runtime assumptions, verified"). The
+  three parts matter together: `setsid` detaches the process from the
+  terminal's session (not just the process group `disown` removes it from),
+  `nohup` blocks `SIGHUP`, and `< /dev/null` keeps a closed stdin from
+  delivering EOF/SIGPIPE to a process expecting a foreground terminal. If you
+  need each node to keep running after this runbook's terminal closes, use
+  this form rather than the shorter `&`/`disown` idiom above.
 - **`freenet service` is the real way to keep one running unattended** —
   `freenet service install` registers it as a systemd user service on Linux, a
   launchd agent on macOS, or a tray-supervised Windows service, complete with
