@@ -363,3 +363,54 @@ fn an_over_k_state_comes_back_normalized_through_update() {
 
     assert_eq!(out.len(), 2, "the contract normalizes an over-K state to K=2");
 }
+
+/// Finding 1: a PUT'd over-K state must not summarize or re-offer forever.
+///
+/// `validate_state` is permissive by design (it does not check chess
+/// legality, and it does not evict either -- eviction needs `params`, which
+/// `validate_state` has, but rejecting an over-K state would be a content
+/// judgment this codebase forbids). So a hostile peer can PUT 30 records in
+/// one `(signer, kind, ply)` group. Without normalizing in `summarize_state`
+/// and `get_state_delta`, that node's summary would report all 30 records
+/// forever, and its delta against an honest peer's summary would offer the
+/// same 28 evicted-away records every round -- the same never-settles shape
+/// as `self_delta_empty`.
+#[test]
+fn an_over_k_state_summarizes_and_diffs_as_normalized() {
+    let (w, _b, params) = keys();
+
+    let mut spam = GameState::empty();
+    for i in 0..30u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        spam.absorb_for_test(&Record::sign(
+            &w,
+            &params,
+            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+        ));
+    }
+    assert_eq!(spam.len(), 30, "the crafted state really is over-K");
+
+    // The summary must be bounded to K=2, not 30.
+    let summary_bytes = summarize(&params, &spam);
+    let decoded: Summary = from_reader(summary_bytes.as_ref()).expect("decode summary");
+    assert_eq!(decoded.len(), 2, "summarize_state must normalize before summarizing");
+
+    // A peer holding nothing asks with an empty summary; the delta offered
+    // back must be exactly the normalized K=2, not all 30.
+    let delta_bytes = state_delta(&params, &spam, StateSummary::from(Vec::new()));
+    let delta: Delta = from_reader(delta_bytes.as_ref()).expect("decode delta");
+    assert_eq!(delta.len(), 2, "get_state_delta must normalize before diffing");
+
+    // And once the peer holds the normalized K=2, a second round offers
+    // nothing further -- it must not keep re-offering the evicted 28.
+    let mut normalized = GameState::empty();
+    for rec in &delta {
+        normalized.insert_verified(rec, &params);
+    }
+    let again = state_delta(&params, &spam, summarize(&params, &normalized));
+    assert!(
+        again.as_ref().is_empty(),
+        "an already-normalized peer must not be re-offered evicted-away records"
+    );
+}

@@ -660,11 +660,18 @@ fn a_spammer_cannot_evict_the_opponents_records() {
 
 #[test]
 fn property_1_holds_after_eviction() {
-    let (w, b, params) = keys();
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 20);
+
+    // A and B hold OVERLAPPING fragments of one (signer, kind, ply) group, so
+    // eviction actually fires when the delta is applied. The disjoint-groups
+    // version of this test (spamming w at ply 1 and b at ply 2) let each side
+    // land at K before the exchange, so the law held identically with or
+    // without eviction -- it never exercised the merge path.
     let mut a = GameState::empty();
-    a.merge(&raw(&spam_moves(&w, &params, 1, 12)), &params);
+    a.merge(&raw(&spam[..15]), &params);
     let mut peer_b = GameState::empty();
-    peer_b.merge(&raw(&spam_moves(&b, &params, 2, 12)), &params);
+    peer_b.merge(&raw(&spam[5..]), &params);
 
     let delta = a.delta_against(&peer_b.summarize());
     let mut applied = peer_b.clone();

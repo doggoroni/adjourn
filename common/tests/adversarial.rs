@@ -86,12 +86,35 @@ fn forged_signature_cannot_evict_the_valid_record() {
 /// points in the pipeline reach different states.
 #[test]
 fn merge_and_filter_commute() {
-    let (state, params, _, _) = play(&["e2e4"]);
+    let (state, params, w, _) = play(&["e2e4"]);
     let good = state.records.values().next().unwrap().clone();
+
+    // A single record can't distinguish filter-then-merge from
+    // merge-then-filter under eviction -- with K=2 either order keeps it. Add
+    // a group with more than K records, split across the two peers, so
+    // top-K's distributivity is actually exercised: each side alone would
+    // keep a different two records than the union does.
+    let mut spam = Vec::new();
+    for i in 0..6u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        spam.push(Record::sign(
+            &w,
+            &params,
+            Body::Move { ply: 5, parent, uci: "g1f3".into() },
+        ));
+    }
 
     let mut attacker = GameState::empty();
     attacker.absorb_for_test(&poison(&good));
-    let honest = state.clone();
+    for r in &spam[..3] {
+        attacker.absorb_for_test(r);
+    }
+
+    let mut honest = state.clone();
+    for r in &spam[3..] {
+        honest.absorb_for_test(r);
+    }
 
     let filter_then_merge = attacker
         .filter_valid(&params)
@@ -99,8 +122,11 @@ fn merge_and_filter_commute() {
     let merge_then_filter = attacker.merged(&honest, &params).filter_valid(&params);
 
     assert_eq!(filter_then_merge, merge_then_filter);
-    assert_eq!(filter_then_merge.len(), 1, "the honest move must survive");
-    assert_eq!(filter_then_merge, state);
+    assert_eq!(
+        filter_then_merge.len(),
+        3,
+        "the ply-1 move plus top-K=2 of the ply-5 spam group survive"
+    );
 }
 
 /// A strict superset moves the projection DOWN: a decided game (mate at ply 7)
