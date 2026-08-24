@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::node::NodeClient;
 
-/// Contract state only, keyed by the contract instance id's raw bytes.
+/// Contract params and state, keyed by the contract instance id's raw bytes.
 ///
 /// `ContractInstanceId` does not implement `Ord` (freenet-stdlib 0.8.5), so a
 /// `BTreeMap<ContractInstanceId, _>` does not compile; keying on the id's
@@ -28,9 +28,14 @@ use crate::node::NodeClient;
 /// deterministic ordering `BTreeMap` is chosen for elsewhere in this
 /// workspace, without needing a newtype wrapper.
 ///
+/// Parameters live HERE rather than per-node: a node that learns a contract
+/// learns its parameters with it, and a node that never PUT the contract
+/// (because its opponent did first) must still be able to run the contract
+/// against it.
+///
 /// Shared across fakes so they converge on the same public state, exactly
 /// like two real nodes replicating the same contract.
-pub type World = Arc<Mutex<BTreeMap<[u8; 32], Vec<u8>>>>;
+pub type World = Arc<Mutex<BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>>>;
 
 pub fn shared_world() -> World {
     Arc::new(Mutex::new(BTreeMap::new()))
@@ -40,10 +45,6 @@ pub fn shared_world() -> World {
 /// `NodeClient` callers can be exercised without a live Freenet node.
 pub struct FakeNode {
     world: World,
-    /// Params are needed by every `Contract` method but are not part of the
-    /// contract *state* — each node keeps the params for the games it knows
-    /// about separately, populated on `put`.
-    params: BTreeMap<[u8; 32], Parameters<'static>>,
     store: MemoryStore,
 }
 
@@ -51,19 +52,19 @@ impl FakeNode {
     pub fn new(world: World) -> Self {
         Self {
             world,
-            params: BTreeMap::new(),
             store: MemoryStore::default(),
         }
     }
 
     /// Test helper: seed the shared world with raw bytes for an id, bypassing
     /// the contract entirely. Used to assert that two fakes see the same
-    /// state once one of them writes it.
+    /// state once one of them writes it. Never runs the contract, so an
+    /// empty placeholder `Parameters` is fine.
     pub fn put_raw(&mut self, id: ContractInstanceId, state: Vec<u8>) {
         self.world
             .lock()
             .expect("world lock poisoned")
-            .insert(*id, state);
+            .insert(*id, (Parameters::from(Vec::<u8>::new()), state));
     }
 }
 
@@ -78,36 +79,30 @@ impl NodeClient for FakeNode {
             .lock()
             .expect("world lock poisoned")
             .get(&*id)
-            .cloned())
+            .map(|(_, state)| state.clone()))
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {
         let id = *container.id();
-        self.params.insert(*id, container.params());
         self.world
             .lock()
             .expect("world lock poisoned")
-            .insert(*id, state);
+            .insert(*id, (container.params(), state));
         Ok(())
     }
 
     async fn update(&mut self, key: ContractKey, delta: Vec<u8>) -> anyhow::Result<()> {
         let id = *key.id();
-        let params = self
-            .params
-            .get(&*id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("fake node has no params for contract {id}"))?;
-        let current = self
+        let (params, current) = self
             .world
             .lock()
             .expect("world lock poisoned")
             .get(&*id)
             .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| anyhow::anyhow!("fake node has no state for contract {id}"))?;
 
         let modification = Contract::update_state(
-            params,
+            params.clone(),
             State::from(current),
             vec![UpdateData::Delta(StateDelta::from(delta))],
         )
@@ -117,7 +112,7 @@ impl NodeClient for FakeNode {
         self.world
             .lock()
             .expect("world lock poisoned")
-            .insert(*id, new_state.as_ref().to_vec());
+            .insert(*id, (params, new_state.as_ref().to_vec()));
         Ok(())
     }
 
@@ -125,7 +120,7 @@ impl NodeClient for FakeNode {
         let world = self.world.clone();
         Ok(adjourn_delegate::handle(
             &mut self.store,
-            |id| world.lock().ok()?.get(id).cloned(),
+            |id| world.lock().ok()?.get(id).map(|(_, state)| state.clone()),
             None,
             req,
         ))
