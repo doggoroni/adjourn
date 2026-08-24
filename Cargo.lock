@@ -18,6 +18,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_bytes",
+ "shakmaty",
  "thiserror",
  "tokio",
  "tokio-tungstenite",

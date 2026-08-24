@@ -224,6 +224,8 @@ fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Res
                 side: Some(record.side),
                 last_signed_ply: record.last_signed_ply,
                 entropy: Some(record.entropy),
+                params: Some(record.params.clone()),
+                contract: Some(record.contract),
             },
             None => GameSummary {
                 label,
@@ -231,6 +233,8 @@ fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Res
                 game_id: None,
                 side: None,
                 last_signed_ply: 0,
+                params: None,
+                contract: None,
                 entropy: quality,
             },
         });

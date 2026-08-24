@@ -8,12 +8,20 @@
 //! id so a build mismatch between the two players — different
 //! `adjourn-contract` bytes deriving different ids from identical params —
 //! is loud rather than silent.
+//!
+//! The rest of this module is the move flow: play a move, resign, offer or
+//! accept a draw, or just read the current status. All of them go through
+//! [`bound_game`] to turn a `label` into the `GameParams` and contract id the
+//! delegate already recorded at bind time (see the `params`/`contract`
+//! fields on `GameSummary`), then GET the contract, `project` it, and — for
+//! `play_move` — run local pre-checks before ever bothering the delegate.
 
-use adjourn_core::delegate_api::{Refusal, Request, Response, Side};
-use adjourn_core::GameParams;
+use adjourn_core::delegate_api::{GameSummary, Refusal, Request, Response, Side};
+use adjourn_core::{legal_moves, project, Body, GameParams, GameState, Status};
 use anyhow::{bail, Context};
-use freenet_stdlib::prelude::ContractInstanceId;
+use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId};
 use rand::RngCore;
+use shakmaty::Color;
 
 use crate::invite::{GameOffer, Invite};
 use crate::node::{contract_container, NodeClient};
@@ -25,7 +33,7 @@ fn random_entropy() -> [u8; 32] {
 }
 
 fn refused(refusal: Refusal) -> anyhow::Error {
-    anyhow::anyhow!("delegate refused: {refusal:?}")
+    anyhow::anyhow!("delegate refused: {refusal}")
 }
 
 /// Ask the delegate for a fresh signing key under `label`, then wrap the
@@ -162,4 +170,347 @@ pub async fn game_bind<N: NodeClient>(
     }
 
     Ok(id)
+}
+
+/// Turn a `label` into the game the delegate already recorded for it.
+///
+/// `GameSummary.params`/`.contract` are what close the loop: `game_id` is a
+/// one-way hash, so a caller holding only a label has no way to recover the
+/// `GameParams` `project` needs, or the contract id (`hash(code,
+/// cbor(params))`), without the delegate handing them back.
+async fn bound_game<N: NodeClient>(node: &mut N, label: &str) -> anyhow::Result<GameSummary> {
+    let response = node
+        .delegate(Request::ListGames)
+        .await
+        .context("ListGames")?;
+    let games = match response {
+        Response::Games(games) => games,
+        Response::Refused(r) => return Err(refused(r)),
+        other => bail!("unexpected response to ListGames: {other:?}"),
+    };
+    let summary = games
+        .into_iter()
+        .find(|g| g.label == label)
+        .ok_or_else(|| anyhow::anyhow!("no key exists for label {label:?}"))?;
+    if summary.game_id.is_none()
+        || summary.side.is_none()
+        || summary.params.is_none()
+        || summary.contract.is_none()
+    {
+        bail!("label {label:?} has a key but no game bound yet");
+    }
+    Ok(summary)
+}
+
+/// Derive the contract's key and container from `params`, and confirm the id
+/// matches what the delegate recorded at bind time. A mismatch means this
+/// build's `contract_wasm` differs from the one used when the game was
+/// bound, which would otherwise silently GET, PUT and UPDATE the wrong
+/// contract.
+fn expected_container(
+    contract_wasm: Vec<u8>,
+    params: &GameParams,
+    bound_contract: [u8; 32],
+) -> anyhow::Result<ContractContainer> {
+    let (container, id) =
+        contract_container(contract_wasm, params).context("deriving contract id")?;
+    if *id != bound_contract {
+        bail!(
+            "build mismatch: this build derives contract {} from the bound params, \
+             but the delegate recorded {}. Rebuild with the same adjourn-contract \
+             version used when this game was bound.",
+            ContractInstanceId::new(*id).encode(),
+            ContractInstanceId::new(bound_contract).encode(),
+        );
+    }
+    Ok(container)
+}
+
+/// GET the contract's raw state and decode it. Empty bytes (a freshly PUT
+/// contract nobody has moved in yet) decode as the empty state, not an
+/// error, mirroring `adjourn_contract`'s own `decode_state`.
+async fn fetch_state<N: NodeClient>(node: &mut N, contract: [u8; 32]) -> anyhow::Result<GameState> {
+    let bytes = node
+        .get(ContractInstanceId::new(contract), false)
+        .await
+        .context("GET contract")?
+        .unwrap_or_default();
+    if bytes.is_empty() {
+        return Ok(GameState::empty());
+    }
+    GameState::decode(&bytes)
+        .ok_or_else(|| anyhow::anyhow!("contract state did not decode as a GameState"))
+}
+
+/// Ask the delegate to sign `body`, submit it as a one-record delta, and
+/// return the freshly projected [`Status`].
+///
+/// This is the only place that talks to the delegate's `Sign` request and to
+/// `NodeClient::update`, so every caller — `play_move`, `resign`,
+/// `draw_offer`, `draw_accept`, and the test-only `sign_move_at_ply` bypass —
+/// goes through one path to the actual guarantee: the delegate refuses a
+/// body it should not sign (most importantly, a second different move at a
+/// ply it already signed) regardless of what any caller's local checks did
+/// or did not verify first.
+async fn sign_and_submit<N: NodeClient>(
+    node: &mut N,
+    game_id: [u8; 32],
+    container: ContractContainer,
+    params: &GameParams,
+    contract: [u8; 32],
+    body: Body,
+) -> anyhow::Result<Status> {
+    let response = node
+        .delegate(Request::Sign { game_id, body })
+        .await
+        .context("Sign")?;
+    let record = match response {
+        Response::Signed { record } => record,
+        Response::Refused(r) => return Err(refused(r)),
+        other => bail!("unexpected response to Sign: {other:?}"),
+    };
+
+    let mut delta = Vec::new();
+    ciborium::into_writer(&vec![record], &mut delta).context("encode delta")?;
+
+    node.update(container.key(), delta)
+        .await
+        .context("UPDATE contract")?;
+
+    let state = fetch_state(node, contract).await?;
+    Ok(project(&state, params))
+}
+
+/// Read the current status for `label` without attempting any move.
+pub async fn show_label<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game.params.expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    Ok(project(&state, &params))
+}
+
+/// Play `uci` for `label`.
+///
+/// The pre-checks below (game not over, our turn, move legal) exist only to
+/// give the user a good error before bothering the delegate. They are **not**
+/// the guarantee. A client running on a stale view could pass every one of
+/// them and still be handing the delegate a second, different move at a ply
+/// it already signed -- the fraud proof that forfeits the signer. The
+/// delegate's monotonic ply counter (`decide_sign` in
+/// `adjourn_core::delegate_policy`) is what actually refuses that; this
+/// function only tries to avoid asking.
+pub async fn play_move<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    uci: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let side = game.side.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+
+    if status.is_over() {
+        bail!("the game is already over");
+    }
+    if Side::from(status.turn) != side {
+        bail!("it is not your turn");
+    }
+    if !legal_moves(&state, &params).iter().any(|m| m == uci) {
+        bail!("{uci} is not a legal move in the current position");
+    }
+
+    let parent = status
+        .chain
+        .last()
+        .copied()
+        .unwrap_or_else(|| params.genesis());
+    let body = Body::Move {
+        ply: status.ply + 1,
+        parent,
+        uci: uci.to_string(),
+    };
+
+    sign_and_submit(node, game_id, container, &params, contract, body).await
+}
+
+/// Resign `label`. Unconditional and position-independent (see
+/// `Body::Resign`), so the only local pre-check is that the game is not
+/// already decided.
+pub async fn resign<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+    if status.is_over() {
+        bail!("the game is already over");
+    }
+
+    sign_and_submit(node, game_id, container, &params, contract, Body::Resign).await
+}
+
+/// Offer a draw in `label`, anchored to the current head so it implicitly
+/// expires once the game moves on (see invariant 9 in `CLAUDE.md`).
+pub async fn draw_offer<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+    if status.is_over() {
+        bail!("the game is already over");
+    }
+    let at = status
+        .chain
+        .last()
+        .copied()
+        .unwrap_or_else(|| params.genesis());
+
+    sign_and_submit(
+        node,
+        game_id,
+        container,
+        &params,
+        contract,
+        Body::DrawOffer { at },
+    )
+    .await
+}
+
+/// Accept the opponent's live draw offer in `label` -- one anchored to the
+/// current head, per invariant 9. Refuses rather than guessing if there is
+/// none.
+pub async fn draw_accept<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let side = game.side.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+    if status.is_over() {
+        bail!("the game is already over");
+    }
+    let head = status
+        .chain
+        .last()
+        .copied()
+        .unwrap_or_else(|| params.genesis());
+    let our_color: Color = side.into();
+
+    let offer = state
+        .records
+        .iter()
+        .find(|(_, rec)| {
+            matches!(&rec.body, Body::DrawOffer { at } if *at == head)
+                && rec.color(&params) == Some(!our_color)
+        })
+        .map(|(id, _)| *id)
+        .ok_or_else(|| anyhow::anyhow!("no live draw offer from your opponent to accept"))?;
+
+    sign_and_submit(
+        node,
+        game_id,
+        container,
+        &params,
+        contract,
+        Body::DrawAccept { offer },
+    )
+    .await
+}
+
+/// Test-only bypass around `play_move`'s local pre-checks.
+///
+/// It still GETs and projects the current state (so `parent` is correct for
+/// `ply`), but it does NOT check whose turn it is, whether the game is over,
+/// or whether `uci` is legal -- it signs whatever `ply`/`uci` the caller asks
+/// for. That is deliberate: it exists so a test can drive a double-sign
+/// attempt straight at the delegate, proving that the delegate's own
+/// monotonic ply counter refuses it, rather than the refusal being masked by
+/// this client's own guard.
+pub async fn sign_move_at_ply<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    ply: u16,
+    uci: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let game = bound_game(node, label).await?;
+    let params = game
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let contract = game.contract.expect("bound_game checked this is Some");
+    let game_id = game.game_id.expect("bound_game checked this is Some");
+    let container = expected_container(contract_wasm, &params, contract)?;
+
+    let state = fetch_state(node, contract).await?;
+    let status = project(&state, &params);
+
+    // The parent for `ply` is whatever record precedes it in the chain, NOT
+    // necessarily the current head: a double-sign attempt at an
+    // already-signed ply must reuse that ply's original parent, not the
+    // chain's head after it advanced past it.
+    let parent = if ply <= 1 {
+        params.genesis()
+    } else {
+        *status
+            .chain
+            .get(ply as usize - 2)
+            .ok_or_else(|| anyhow::anyhow!("no record at ply {} to parent ply {ply} on", ply - 1))?
+    };
+    let body = Body::Move {
+        ply,
+        parent,
+        uci: uci.to_string(),
+    };
+
+    sign_and_submit(node, game_id, container, &params, contract, body)
+        .await
+        .with_context(|| format!("sign move at ply {ply}"))
 }

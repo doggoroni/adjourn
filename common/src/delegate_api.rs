@@ -110,6 +110,16 @@ pub struct GameSummary {
     pub last_signed_ply: u16,
     /// `None` for a label that exists but is not bound yet.
     pub entropy: Option<EntropyQuality>,
+    /// The game's parameters, once bound. `None` for a label that has a key
+    /// but no game yet.
+    ///
+    /// Needed because `game_id` is a one-way hash: a caller holding only a
+    /// label otherwise has no route back to the params that `project` needs,
+    /// nor to the contract id, which is `hash(code, cbor(params))`.
+    pub params: Option<GameParams>,
+    /// The game contract's instance id, once bound.
+    #[serde(with = "serde_bytes")]
+    pub contract: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +152,48 @@ pub enum Refusal {
     Malformed(String),
     StoreFailed,
     IllegalMove,
+}
+
+/// Human sentences, not debug output — a refusal is an expected outcome the
+/// UI shows a user, not a crash. `PlyAlreadySigned` in particular is the one
+/// a user hits through legitimate retry, so it reads as an explanation with
+/// an action, not a struct dump.
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::UnknownLabel => write!(f, "no key exists for that label"),
+            Refusal::LabelExists => write!(f, "a key already exists for that label"),
+            Refusal::UnknownGame => write!(f, "no game is bound to that label"),
+            Refusal::AlreadyBound { .. } => {
+                write!(f, "that label is already bound to a different game")
+            }
+            Refusal::KeyNotInParams => write!(
+                f,
+                "this key is not one of the two players named in the game's parameters"
+            ),
+            Refusal::WrongSide { ours, ply_needs } => {
+                write!(f, "it is {ply_needs:?}'s turn, but this key plays {ours:?}")
+            }
+            Refusal::PlyAlreadySigned { ply } => write!(
+                f,
+                "you have already signed a different move at ply {ply}; \
+                 re-send the identical move, or wait for your opponent"
+            ),
+            Refusal::WrongOrigin => {
+                write!(f, "this game was bound by a different caller")
+            }
+            Refusal::NoEntropy => {
+                write!(f, "no entropy source is available to generate a key")
+            }
+            Refusal::StaleRecordFormat { found, expected } => write!(
+                f,
+                "the stored record is format {found}, but this delegate speaks format {expected}"
+            ),
+            Refusal::Malformed(msg) => write!(f, "malformed request: {msg}"),
+            Refusal::StoreFailed => write!(f, "the secret store rejected the write"),
+            Refusal::IllegalMove => write!(f, "that move is illegal in the current position"),
+        }
+    }
 }
 
 fn encode_cbor<T: Serialize>(value: &T) -> Vec<u8> {
