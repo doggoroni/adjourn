@@ -334,3 +334,32 @@ fn two_peers_converge_in_one_round() {
         );
     }
 }
+
+#[test]
+fn an_over_k_state_comes_back_normalized_through_update() {
+    let (w, _b, params) = keys();
+
+    // Crafted bytes: 30 records from one signer in one (signer, kind, ply)
+    // group. `absorb_for_test` bypasses eviction, which is exactly what a
+    // hostile peer's encoder would do.
+    let mut spam = GameState::empty();
+    for i in 0..30u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        spam.absorb_for_test(&Record::sign(
+            &w,
+            &params,
+            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+        ));
+    }
+    assert_eq!(spam.len(), 30, "the crafted state really is over-K");
+
+    let out = update(
+        &params,
+        &GameState::empty(),
+        vec![UpdateData::State(state_bytes(&spam))],
+    )
+    .expect("update_state");
+
+    assert_eq!(out.len(), 2, "the contract normalizes an over-K state to K=2");
+}

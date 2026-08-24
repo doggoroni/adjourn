@@ -30,6 +30,28 @@ fn play(moves: &[&str]) -> (GameState, GameParams, SigningKey, SigningKey) {
     (state, params, w, b)
 }
 
+/// `n` structurally-valid records from one signer in one `(signer, kind, ply)`
+/// group. Varying `parent` gives distinct bodies -- hence distinct ids -- while
+/// `verify` stays true, since it does not check the parent link.
+fn spam_moves(key: &SigningKey, params: &GameParams, ply: u16, n: usize) -> Vec<Record> {
+    (0..n)
+        .map(|i| {
+            let mut parent = [0u8; 32];
+            parent[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            Record::sign(key, params, Body::Move { ply, parent, uci: "e2e4".into() })
+        })
+        .collect()
+}
+
+/// A state holding exactly these records, with NO eviction applied.
+fn raw(records: &[Record]) -> GameState {
+    let mut s = GameState::empty();
+    for r in records {
+        s.absorb_for_test(r);
+    }
+    s
+}
+
 /// A second, different, but fully VALID signature over the same body.
 ///
 /// ed25519 verification does not pin the nonce, so re-signing with a different
@@ -547,4 +569,126 @@ fn round_trips_through_cbor() {
         bytes.len(),
         full.len()
     );
+}
+
+#[test]
+fn eviction_bounds_a_spammed_group() {
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 50);
+    let mut state = GameState::empty();
+    state.merge(&raw(&spam), &params);
+    assert_eq!(state.len(), 2, "Move groups are capped at K=2");
+}
+
+#[test]
+fn eviction_distributes_over_merge() {
+    let (w, b, params) = keys();
+    let mut spam = spam_moves(&w, &params, 1, 25);
+    spam.extend(spam_moves(&b, &params, 2, 25));
+
+    // The law only bites when peers hold different fragments, so partition
+    // randomly and repeatedly rather than at one fixed point.
+    let mut rng = Rng(0x9E3779B97F4A7C15);
+    let mut whole = raw(&spam);
+    whole.evict();
+
+    for _ in 0..64 {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for rec in &spam {
+            if rng.below(2) == 0 {
+                left.push(rec.clone());
+            } else {
+                right.push(rec.clone());
+            }
+        }
+
+        // topK(topK(A) ∪ topK(B)) must equal topK(A ∪ B).
+        let mut split = GameState::empty();
+        split.merge(&raw(&left), &params);
+        split.merge(&raw(&right), &params);
+
+        assert_eq!(
+            split.records, whole.records,
+            "top-K must distribute over union for every partition"
+        );
+    }
+}
+
+#[test]
+fn eviction_is_idempotent() {
+    let (w, _b, params) = keys();
+    let mut state = GameState::empty();
+    state.merge(&raw(&spam_moves(&w, &params, 1, 30)), &params);
+    let once = state.clone();
+    state.evict();
+    assert_eq!(once.records, state.records);
+}
+
+#[test]
+fn merge_with_eviction_stays_commutative_and_associative() {
+    let (w, b, params) = keys();
+    let a = spam_moves(&w, &params, 1, 9);
+    let c = spam_moves(&b, &params, 2, 9);
+    let d = spam_moves(&w, &params, 3, 9);
+
+    // `merged` evicts, so these are already normalized -- no extra evict call.
+    let abc = raw(&a).merged(&raw(&c), &params).merged(&raw(&d), &params);
+    let cba = raw(&d).merged(&raw(&c), &params).merged(&raw(&a), &params);
+    assert_eq!(abc.records, cba.records, "order of merges must not matter");
+}
+
+#[test]
+fn a_spammer_cannot_evict_the_opponents_records() {
+    let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
+    let black_move = state
+        .records
+        .iter()
+        .find(|(_, r)| r.color(&params) == Some(Color::Black))
+        .map(|(id, _)| *id)
+        .expect("black moved");
+
+    // White floods every group they own at black's ply.
+    let mut flooded = state.clone();
+    flooded.merge(&raw(&spam_moves(&w, &params, 2, 60)), &params);
+
+    assert!(
+        flooded.records.contains_key(&black_move),
+        "grouping is per signer: only your own records compete with yours"
+    );
+}
+
+#[test]
+fn property_1_holds_after_eviction() {
+    let (w, b, params) = keys();
+    let mut a = GameState::empty();
+    a.merge(&raw(&spam_moves(&w, &params, 1, 12)), &params);
+    let mut peer_b = GameState::empty();
+    peer_b.merge(&raw(&spam_moves(&b, &params, 2, 12)), &params);
+
+    let delta = a.delta_against(&peer_b.summarize());
+    let mut applied = peer_b.clone();
+    applied.apply_delta(&delta, &params);
+
+    // applyDelta(σ_B, δ) ⊔ σ_A == applyDelta(σ_B, δ)
+    let joined = applied.merged(&a, &params);
+    assert_eq!(applied.records, joined.records, "whitepaper Property 1");
+}
+
+#[test]
+fn two_peers_converge_when_one_holds_a_record_the_other_evicts() {
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 20);
+    let mut a = GameState::empty();
+    a.merge(&raw(&spam[..10]), &params);
+    let mut peer_b = GameState::empty();
+    peer_b.merge(&raw(&spam[10..]), &params);
+
+    // One bidirectional exchange.
+    let to_b = a.delta_against(&peer_b.summarize());
+    let to_a = peer_b.delta_against(&a.summarize());
+    peer_b.apply_delta(&to_b, &params);
+    a.apply_delta(&to_a, &params);
+
+    assert_eq!(a.records, peer_b.records, "converged after one round trip");
 }

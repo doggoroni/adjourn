@@ -41,6 +41,15 @@ fn poison(rec: &Record) -> Record {
     }
 }
 
+/// A state holding exactly these records, with NO eviction applied.
+fn raw_state(records: &[Record]) -> GameState {
+    let mut s = GameState::empty();
+    for r in records {
+        s.absorb_for_test(r);
+    }
+    s
+}
+
 // ---------------------------------------------------------------------------
 // 1. Convergence
 // ---------------------------------------------------------------------------
@@ -616,4 +625,67 @@ fn resign_has_no_ply_and_one_possible_id() {
     let b = Record::sign(&w, &params, Body::Resign);
     assert_eq!(a.body.ply(), None, "Resign is a unit variant: no ply to group on");
     assert_eq!(a.id(), b.id(), "one signer has exactly one possible Resign id");
+}
+
+#[test]
+fn flooding_draw_offers_cannot_evict_a_move_at_the_same_ply() {
+    let (state, params, w, _b) = play(&["e2e4"]);
+    let white_move = *state.records.keys().next().expect("one move");
+
+    let offers: Vec<Record> = (0..50u64)
+        .map(|i| {
+            let mut at = [0u8; 32];
+            at[..8].copy_from_slice(&i.to_le_bytes());
+            Record::sign(&w, &params, Body::DrawOffer { ply: 1, at })
+        })
+        .collect();
+
+    let mut flooded = state.clone();
+    let mut raw_offers = GameState::empty();
+    for o in &offers {
+        raw_offers.absorb_for_test(o);
+    }
+    flooded.merge(&raw_offers, &params);
+
+    assert!(
+        flooded.records.contains_key(&white_move),
+        "kind is part of the group key, so offers never compete with moves"
+    );
+}
+
+/// The trade this design accepts, made executable so it cannot silently get
+/// worse. Eviction must sort blind by id -- legality depends on the chain --
+/// so a cheater can bury a double-sign under lower-id illegal records. The
+/// forfeit is lost, but the result is a STALL, never a stolen win.
+#[test]
+fn a_buried_double_sign_stalls_instead_of_forfeiting() {
+    let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
+    let head = project(&state, &params).chain.last().copied().expect("head");
+
+    // Two genuinely different legal moves at ply 3: the fraud.
+    let a = Record::sign(&w, &params, Body::Move { ply: 3, parent: head, uci: "g1f3".into() });
+    let b = Record::sign(&w, &params, Body::Move { ply: 3, parent: head, uci: "b1c3".into() });
+
+    let mut fraud = state.clone();
+    fraud.merge(&raw_state(&[a.clone(), b.clone()]), &params);
+    let caught = project(&fraud, &params);
+    assert_eq!(
+        caught.decision.map(|d| d.reason),
+        Some(Reason::DoubleSignForfeit),
+        "unburied, a double-sign still forfeits"
+    );
+
+    // Now bury both under lower-id records in the same group.
+    let mut buried = state.clone();
+    let mut junk: Vec<Record> = vec![a, b];
+    for i in 0..64u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        junk.push(Record::sign(&w, &params, Body::Move { ply: 3, parent, uci: "e2e4".into() }));
+    }
+    buried.merge(&raw_state(&junk), &params);
+
+    let stalled = project(&buried, &params);
+    assert_eq!(stalled.decision, None, "the forfeit is evaded: no decision");
+    assert_eq!(stalled.ply, 2, "and the chain stalls one ply short");
 }
