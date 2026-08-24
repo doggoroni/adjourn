@@ -332,11 +332,16 @@ machine-specific paths and produces a different, unshippable key.
   build or wasmtime instance in the loop. Only the `DelegateCtx` impl of
   `SecretStore` (talking to the real secret store host import) needs the wasm
   target.
-- **`GameRecord.origin` is `Option<MessageOrigin>`, not `MessageOrigin`.** The
-  origin binds a bound game to whichever `MessageOrigin` created it, and
-  `handle_list_games` filters by `load_owner(store, &label) == origin` so one
-  origin cannot enumerate another's labels. A CLI client has no `MessageOrigin`
-  at all — the node passes `origin: None` for a direct WS-API caller — so
+- **`GameRecord.origin` is `Option<[u8; 32]>`, not `Option<MessageOrigin>`**
+  (`common/src/delegate_policy.rs`) — what is persisted is the origin's
+  derived contract-instance id, not the enum. `Option<MessageOrigin>` is one
+  layer up: the parameter type the runtime hands the delegate's `lib.rs`
+  handlers, which `origin_id()` converts to `Option<[u8; 32]>` before it ever
+  reaches `delegate_policy` or gets stored. The origin binds a bound game to
+  whichever id created it, and `handle_list_games` filters by
+  `load_owner(store, &label) == origin` so one origin cannot enumerate
+  another's labels. A CLI client has no `MessageOrigin` at all — the node
+  passes `origin: None` for a direct WS-API caller — so
   making the field optional was required, not speculative: with a non-optional
   field every CLI-issued bind and signature would have been refused outright.
   The corollary: for a CLI-bound game the origin check provides no isolation
