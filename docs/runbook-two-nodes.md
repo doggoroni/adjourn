@@ -3,21 +3,21 @@
 How to play a complete correspondence game across two real `freenet` nodes on
 one machine, each acting as one player.
 
-## Status: not fully runnable yet
+## Status: wired, not yet verified against a live node
 
 **Sections 1–3 (build, and starting the two nodes) work today.** Section 4
 (the `adjourn` game commands: `init`, `invite`, `game bind`, `move`, `show`,
-...) does **not** — `cli/src/main.rs` is currently a stub (`println!("adjourn:
-not yet wired up")`). The command surface below is the one specified in
-`docs/superpowers/specs/2026-08-23-adjourn-cli-design.md` and exercised
-end-to-end against a pair of in-memory `FakeNode`s in
-`cli/tests/full_game.rs`; wiring it onto `main.rs` as real `clap` subcommands
-is Task 9. Once that lands, this procedure should work as written against the
-two live nodes started in Section 3 — that is the point of writing it now
-rather than after.
+...) is now wired: `cli/src/main.rs` routes every command below to
+`adjourn_cli::session` (Task 9). `watch` is the one command in the design
+spec left unimplemented — it needs a streaming `NodeClient` method that does
+not exist yet, so it prints an error and exits non-zero rather than hanging
+or silently doing nothing; poll with `adjourn show` instead.
 
-Do not treat Section 4 as verified against a live node. It has been verified
-only against `FakeNode`, which runs the real contract and delegate code but
+This host cannot link a binary (`dlltool.exe` is missing), so Task 9 was
+verified with `cargo check`/`cargo clippy -p adjourn-cli --all-targets` only
+— compiles and type-checks clean, but the commands below have **not actually
+been run**. It has been verified end-to-end only against `FakeNode`, which
+runs the real contract and delegate code but
 never touches a WebSocket or a real `freenet` process.
 
 ## 0. Prerequisites
@@ -121,12 +121,11 @@ A response (even a 4xx for a bare GET on a WS-only endpoint) means the port is
 listening. If either hangs or refuses, check that node's terminal for a bind
 error before continuing.
 
-## 4. Play the game (not runnable until Task 9 lands)
+## 4. Play the game (wired, unverified against a live node -- see Status above)
 
 The exact commands below match the surface in
-`docs/superpowers/specs/2026-08-23-adjourn-cli-design.md`. Everything below
-`adjourn init` requires `main.rs` to route to `adjourn_cli::session`, which
-does not exist yet.
+`docs/superpowers/specs/2026-08-23-adjourn-cli-design.md`. `main.rs` now
+routes every one of them to `adjourn_cli::session`.
 
 ### 4.1 Register the delegate on each node
 
