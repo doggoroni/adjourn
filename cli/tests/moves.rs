@@ -2,7 +2,7 @@ mod common;
 
 use adjourn_cli::fake::{shared_world, FakeNode};
 use adjourn_cli::session::{
-    game_bind, invite_accept, invite_new, play_move, show_label, sign_move_at_ply,
+    draw_claim, game_bind, invite_accept, invite_new, play_move, show_label, sign_move_at_ply,
 };
 use adjourn_core::delegate_api::Side;
 
@@ -71,4 +71,20 @@ async fn a_double_sign_attempt_is_refused_by_the_delegate() {
         .await
         .expect_err("the delegate must refuse a second move at ply 1");
     assert!(format!("{err:#}").contains("ply 1"), "got: {err:#}");
+}
+
+/// A groundless claim is refused locally. A claim with no valid ground is
+/// ignored at projection anyway, so signing one would only add a dead record
+/// to state.
+#[tokio::test]
+async fn draw_claim_refuses_when_there_is_no_ground_to_claim() {
+    let Some((mut alice, _bob, wasm)) = setup().await else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+
+    let err = draw_claim(&mut alice, "alice", wasm)
+        .await
+        .expect_err("a fresh game has nothing to claim");
+    let text = format!("{err:#}").to_lowercase();
+    assert!(text.contains("no draw to claim"), "got: {err:#}");
 }

@@ -138,6 +138,11 @@ enum DrawCommand {
         #[arg(long)]
         label: String,
     },
+    /// Claim a draw by threefold repetition or the fifty-move rule.
+    Claim {
+        #[arg(long)]
+        label: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -327,6 +332,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
             let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
             let status = session::draw_accept(&mut node, &label, contract_wasm).await?;
+            output::render_status(&label, &status);
+        }
+
+        Command::Draw(DrawCommand::Claim { label }) => {
+            let contract_wasm = read_wasm(
+                &cli.contract_wasm,
+                "the contract WASM",
+                "scripts/build-contract.sh",
+            )?;
+            let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
+            let status = session::draw_claim(&mut node, &label, contract_wasm).await?;
             output::render_status(&label, &status);
         }
 
