@@ -266,7 +266,10 @@ pub fn decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8; 32]>) -
             SignDecision::Sign { updated }
         }
         // Idempotent by record id, so no guard is needed.
-        Body::Resign | Body::DrawOffer { .. } | Body::DrawAccept { .. } => SignDecision::Sign {
+        Body::Resign
+        | Body::DrawOffer { .. }
+        | Body::DrawAccept { .. }
+        | Body::DrawClaim { .. } => SignDecision::Sign {
             updated: record.clone(),
         },
     }

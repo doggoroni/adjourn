@@ -157,8 +157,8 @@ fn stale_draw_offer_is_ignored() {
     let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]);
     let chain = project(&state, &params).chain;
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { at: chain[1] });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { offer: offer.id() });
+    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: 2, at: chain[1] });
+    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: 2, offer: offer.id() });
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -177,10 +177,11 @@ fn stale_draw_offer_is_ignored() {
 #[test]
 fn draw_offer_at_the_current_head_is_accepted() {
     let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]);
+    let chain_len = project(&state, &params).chain.len() as u16;
     let head = *project(&state, &params).chain.last().unwrap();
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { at: head });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { offer: offer.id() });
+    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: chain_len, at: head });
+    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: chain_len, offer: offer.id() });
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -208,10 +209,11 @@ fn draw_offer_at_the_current_head_is_accepted() {
 #[test]
 fn accepting_and_then_moving_voids_your_own_acceptance() {
     let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]);
+    let chain_len = project(&state, &params).chain.len() as u16;
     let head = *project(&state, &params).chain.last().unwrap();
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { at: head });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { offer: offer.id() });
+    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: chain_len, at: head });
+    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: chain_len, offer: offer.id() });
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -570,4 +572,48 @@ fn property_1_sync_soundness_holds_on_a_signature_collision() {
         b_after,
         "Property 1 violated: the delta did not dominate the join"
     );
+}
+
+#[test]
+fn a_record_beyond_max_ply_is_not_valid() {
+    let (w, _b, params) = keys();
+    let ok = Record::sign(
+        &w,
+        &params,
+        Body::Move { ply: adjourn_core::types::MAX_PLY, parent: params.genesis(), uci: "e2e4".into() },
+    );
+    assert!(ok.verify(&params), "a record at exactly MAX_PLY must stay valid");
+
+    let too_far = Record::sign(
+        &w,
+        &params,
+        Body::Move { ply: adjourn_core::types::MAX_PLY + 1, parent: params.genesis(), uci: "e2e4".into() },
+    );
+    assert!(!too_far.verify(&params), "ply > MAX_PLY must be structurally invalid");
+
+    // The cap is structural, so it must also refuse a state built from such a
+    // record -- not merely ignore it at projection.
+    let mut state = GameState::empty();
+    state.insert_verified(&too_far, &params);
+    assert!(state.is_empty(), "an over-MAX_PLY record must never enter state");
+}
+
+#[test]
+fn the_ply_cap_applies_to_draw_records_too() {
+    let (w, _b, params) = keys();
+    let rec = Record::sign(
+        &w,
+        &params,
+        Body::DrawOffer { ply: adjourn_core::types::MAX_PLY + 1, at: params.genesis() },
+    );
+    assert!(!rec.verify(&params), "draw records carry a ply and are capped too");
+}
+
+#[test]
+fn resign_has_no_ply_and_one_possible_id() {
+    let (w, _b, params) = keys();
+    let a = Record::sign(&w, &params, Body::Resign);
+    let b = Record::sign(&w, &params, Body::Resign);
+    assert_eq!(a.body.ply(), None, "Resign is a unit variant: no ply to group on");
+    assert_eq!(a.id(), b.id(), "one signer has exactly one possible Resign id");
 }

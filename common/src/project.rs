@@ -213,7 +213,7 @@ fn walk(state: &GameState, params: &GameParams) -> Walk {
 /// a player who had since walked into a losing position.
 fn draw_agreed(state: &GameState, params: &GameParams, head: RecordId) -> bool {
     for rec in state.records.values() {
-        let Body::DrawAccept { offer } = &rec.body else {
+        let Body::DrawAccept { offer, .. } = &rec.body else {
             continue;
         };
         let Some(accepter) = rec.color(params) else {
@@ -222,7 +222,7 @@ fn draw_agreed(state: &GameState, params: &GameParams, head: RecordId) -> bool {
         let Some(offer_rec) = state.records.get(offer) else {
             continue;
         };
-        let Body::DrawOffer { at } = &offer_rec.body else {
+        let Body::DrawOffer { at, .. } = &offer_rec.body else {
             continue;
         };
         if *at != head {

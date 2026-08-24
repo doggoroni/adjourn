@@ -434,7 +434,7 @@ pub async fn draw_offer<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawOffer { at },
+        Body::DrawOffer { ply: g.status.ply, at },
     )
     .await
 }
@@ -464,7 +464,7 @@ pub async fn draw_accept<N: NodeClient>(
         .records
         .iter()
         .find(|(_, rec)| {
-            matches!(&rec.body, Body::DrawOffer { at } if *at == head)
+            matches!(&rec.body, Body::DrawOffer { at, .. } if *at == head)
                 && rec.color(&g.params) == Some(!our_color)
         })
         .map(|(id, _)| *id)
@@ -476,7 +476,7 @@ pub async fn draw_accept<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawAccept { offer },
+        Body::DrawAccept { ply: g.status.ply, offer },
     )
     .await
 }

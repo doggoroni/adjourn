@@ -352,9 +352,10 @@ fn resignation_and_draw_agreement() {
 
     // Draw: offer anchored at the head, accepted by the opponent.
     let (state, params, w, b) = play(&["e2e4", "e7e5"]);
-    let head = project(&state, &params).chain.last().copied().unwrap();
-    let offer = Record::sign(&w, &params, Body::DrawOffer { at: head });
-    let accept = Record::sign(&b, &params, Body::DrawAccept { offer: offer.id() });
+    let status = project(&state, &params);
+    let head = status.chain.last().copied().unwrap();
+    let offer = Record::sign(&w, &params, Body::DrawOffer { ply: status.ply, at: head });
+    let accept = Record::sign(&b, &params, Body::DrawAccept { ply: status.ply, offer: offer.id() });
     let mut drawn = state.clone();
     drawn.insert_verified(&offer, &params);
     drawn.insert_verified(&accept, &params);
@@ -368,8 +369,8 @@ fn resignation_and_draw_agreement() {
 
     // Self-accepting your own offer does nothing.
     let mut sneaky = state.clone();
-    let offer2 = Record::sign(&w, &params, Body::DrawOffer { at: head });
-    let self_accept = Record::sign(&w, &params, Body::DrawAccept { offer: offer2.id() });
+    let offer2 = Record::sign(&w, &params, Body::DrawOffer { ply: status.ply, at: head });
+    let self_accept = Record::sign(&w, &params, Body::DrawAccept { ply: status.ply, offer: offer2.id() });
     sneaky.insert_verified(&offer2, &params);
     sneaky.insert_verified(&self_accept, &params);
     assert_eq!(project(&sneaky, &params).decision, None);
