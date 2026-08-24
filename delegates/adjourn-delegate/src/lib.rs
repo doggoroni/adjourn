@@ -15,6 +15,7 @@ use adjourn_core::{project, Body, GameState};
 use ed25519_dalek::SigningKey;
 use freenet_stdlib::prelude::*;
 use freenet_stdlib::rand::rand_bytes;
+use secrets::SecretStore;
 
 pub struct ChessDelegate;
 
@@ -39,16 +40,13 @@ fn reply(response: Response) -> Vec<OutboundDelegateMsg> {
     )]
 }
 
-fn handle_create_game_key(
-    ctx: &mut DelegateCtx,
+fn handle_create_game_key<S: SecretStore>(
+    store: &mut S,
     origin: Option<[u8; 32]>,
     label: String,
     caller_entropy: Option<[u8; 32]>,
 ) -> Response {
-    let Some(origin) = origin else {
-        return Response::Refused(Refusal::MissingOrigin);
-    };
-    if ctx.get_secret(&secrets::key_secret(&label)).is_some() {
+    if store.get(&secrets::key_secret(&label)).is_some() {
         return Response::Refused(Refusal::LabelExists);
     }
     let (seed, quality) = match derive_seed(probe_host_entropy(), caller_entropy, &label) {
@@ -63,10 +61,17 @@ fn handle_create_game_key(
     if ciborium::into_writer(&quality, &mut quality_buf).is_err() {
         return Response::Refused(Refusal::StoreFailed);
     }
-    if !ctx.set_secret(&secrets::key_secret(&label), &seed)
-        || !ctx.set_secret(&secrets::owner_secret(&label), &origin)
-        || !ctx.set_secret(&secrets::quality_secret(&label), &quality_buf)
-    {
+    // One `&&` chain: if the owner write failed after the key/quality writes
+    // landed, a retry would find `LabelExists` above but the label would have
+    // no recorded owner -- exactly the state `handle_bind_game`'s `WrongOrigin`
+    // guard cannot reclaim (a `None`-origin caller would look like the
+    // rightful owner and could bind out from under the real creator). Fold
+    // the owner write in so a failure anywhere in the chain leaves nothing
+    // behind at all.
+    let ok = store.set(&secrets::key_secret(&label), &seed)
+        && store.set(&secrets::quality_secret(&label), &quality_buf)
+        && origin.is_none_or(|origin_id| store.set(&secrets::owner_secret(&label), &origin_id));
+    if !ok {
         return Response::Refused(Refusal::StoreFailed);
     }
     Response::GameKey {
@@ -76,20 +81,29 @@ fn handle_create_game_key(
     }
 }
 
-fn handle_bind_game(
-    ctx: &mut DelegateCtx,
+fn handle_bind_game<S: SecretStore>(
+    store: &mut S,
     origin: Option<[u8; 32]>,
     label: String,
     params: GameParams,
     contract: [u8; 32],
 ) -> Response {
-    let Some(seed) = secrets::load_seed(ctx, &label) else {
+    let Some(seed) = secrets::load_seed(store, &label) else {
         return Response::Refused(Refusal::UnknownLabel);
     };
+
+    // A label belongs to whoever created it. Without this, any caller that can
+    // reach the delegate could bind someone else's label using a public key
+    // lifted from the invite blob, and thereafter be the only party able to
+    // sign for it.
+    if secrets::load_owner(store, &label) != origin {
+        return Response::Refused(Refusal::WrongOrigin);
+    }
+
     let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
 
     let existing =
-        secrets::load_bound_game_id(ctx, &label).and_then(|id| secrets::load_game(ctx, &id));
+        secrets::load_bound_game_id(store, &label).and_then(|id| secrets::load_game(store, &id));
 
     // The game record is keyed by game_id alone, so one delegate holding BOTH
     // sides of a game would have the second bind overwrite the first player's
@@ -97,7 +111,7 @@ fn handle_bind_game(
     // instead. (Re-keying the store per side is the real fix; this closes the
     // data-loss path without an API change.)
     if existing.is_none() {
-        if let Some(other) = secrets::load_game(ctx, &params.game_id()) {
+        if let Some(other) = secrets::load_game(store, &params.game_id()) {
             if other.label != label {
                 return Response::Refused(Refusal::AlreadyBound {
                     game_id: params.game_id(),
@@ -106,7 +120,7 @@ fn handle_bind_game(
         }
     }
 
-    let quality = secrets::load_quality(ctx, &label).unwrap_or(EntropyQuality::Degraded);
+    let quality = secrets::load_quality(store, &label).unwrap_or(EntropyQuality::Degraded);
 
     match decide_bind(
         existing.as_ref(),
@@ -120,7 +134,7 @@ fn handle_bind_game(
         BindDecision::Refuse(refusal) => Response::Refused(refusal),
         BindDecision::Bind { record } => {
             let game_id = record.game_id();
-            if !secrets::store_game(ctx, &record) {
+            if !secrets::store_game(store, &record) {
                 return Response::Refused(Refusal::StoreFailed);
             }
             Response::Bound { game_id }
@@ -132,8 +146,8 @@ fn handle_bind_game(
 /// it does not decode — and the signature is granted anyway. The monotonic ply
 /// counter in `decide_sign` is the actual guarantee; requiring state here would
 /// let a cold cache lock a player out of their own game.
-fn locally_known_to_be_illegal(
-    ctx: &DelegateCtx,
+fn locally_known_to_be_illegal<S: SecretStore>(
+    store: &S,
     record: &adjourn_core::delegate_policy::GameRecord,
     body: &Body,
 ) -> bool {
@@ -142,7 +156,7 @@ fn locally_known_to_be_illegal(
     };
     // `record.contract`, NOT `record.game_id()`: a contract instance id is
     // hash(code, params) and is a different value from our game id.
-    let Some(bytes) = ctx.get_contract_state(&record.contract) else {
+    let Some(bytes) = store.contract_state(&record.contract) else {
         return false;
     };
     let Some(state) = GameState::decode(&bytes) else {
@@ -162,20 +176,20 @@ fn locally_known_to_be_illegal(
         .any(|m| m == uci)
 }
 
-fn handle_sign(
-    ctx: &mut DelegateCtx,
+fn handle_sign<S: SecretStore>(
+    store: &mut S,
     origin: Option<[u8; 32]>,
     game_id: [u8; 32],
     body: Body,
 ) -> Response {
-    let Some(record) = secrets::load_game(ctx, &game_id) else {
+    let Some(record) = secrets::load_game(store, &game_id) else {
         return Response::Refused(Refusal::UnknownGame);
     };
-    let Some(seed) = secrets::load_seed(ctx, &record.label) else {
+    let Some(seed) = secrets::load_seed(store, &record.label) else {
         return Response::Refused(Refusal::UnknownLabel);
     };
 
-    if locally_known_to_be_illegal(ctx, &record, &body) {
+    if locally_known_to_be_illegal(store, &record, &body) {
         return Response::Refused(Refusal::IllegalMove);
     }
 
@@ -185,7 +199,7 @@ fn handle_sign(
             // Persist BEFORE handing out the signature. If the store write
             // fails we must not release a signature whose ply we did not
             // record, or a retry could produce a different move at that ply.
-            if !secrets::store_game(ctx, &updated) {
+            if !secrets::store_game(store, &updated) {
                 return Response::Refused(Refusal::StoreFailed);
             }
             let key = SigningKey::from_bytes(&seed);
@@ -196,25 +210,22 @@ fn handle_sign(
     }
 }
 
-fn handle_list_games(ctx: &DelegateCtx, origin: Option<[u8; 32]>) -> Response {
-    let Some(origin) = origin else {
-        return Response::Refused(Refusal::MissingOrigin);
-    };
+fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Response {
     let mut games = Vec::new();
-    for label in secrets::list_labels(ctx) {
-        // Only labels created by this same web app are visible. Otherwise any
+    for label in secrets::list_labels(store) {
+        // Only labels created by this same origin (if any) are visible. Otherwise any
         // web app on the node could enumerate every label and public key the
         // user holds across all their chess identities.
-        if secrets::load_owner(ctx, &label) != Some(origin) {
+        if secrets::load_owner(store, &label) != origin {
             continue;
         }
-        let Some(seed) = secrets::load_seed(ctx, &label) else {
+        let Some(seed) = secrets::load_seed(store, &label) else {
             continue;
         };
         let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-        let quality = secrets::load_quality(ctx, &label);
-        let bound =
-            secrets::load_bound_game_id(ctx, &label).and_then(|id| secrets::load_game(ctx, &id));
+        let quality = secrets::load_quality(store, &label);
+        let bound = secrets::load_bound_game_id(store, &label)
+            .and_then(|id| secrets::load_game(store, &id));
         games.push(match bound {
             Some(record) => GameSummary {
                 label,
@@ -223,6 +234,8 @@ fn handle_list_games(ctx: &DelegateCtx, origin: Option<[u8; 32]>) -> Response {
                 side: Some(record.side),
                 last_signed_ply: record.last_signed_ply,
                 entropy: Some(record.entropy),
+                params: Some(record.params.clone()),
+                contract: Some(record.contract),
             },
             None => GameSummary {
                 label,
@@ -230,6 +243,8 @@ fn handle_list_games(ctx: &DelegateCtx, origin: Option<[u8; 32]>) -> Response {
                 game_id: None,
                 side: None,
                 last_signed_ply: 0,
+                params: None,
+                contract: None,
                 entropy: quality,
             },
         });
@@ -237,19 +252,25 @@ fn handle_list_games(ctx: &DelegateCtx, origin: Option<[u8; 32]>) -> Response {
     Response::Games(games)
 }
 
-fn handle(ctx: &mut DelegateCtx, origin: Option<[u8; 32]>, request: Request) -> Response {
+/// Public so the CLI's in-memory `FakeNode` can drive the REAL dispatch code
+/// rather than a reimplementation of it.
+pub fn handle<S: SecretStore>(
+    store: &mut S,
+    origin: Option<[u8; 32]>,
+    request: Request,
+) -> Response {
     match request {
         Request::CreateGameKey {
             label,
             caller_entropy,
-        } => handle_create_game_key(ctx, origin, label, caller_entropy),
+        } => handle_create_game_key(store, origin, label, caller_entropy),
         Request::BindGame {
             label,
             params,
             contract,
-        } => handle_bind_game(ctx, origin, label, params, contract),
-        Request::Sign { game_id, body } => handle_sign(ctx, origin, game_id, body),
-        Request::ListGames => handle_list_games(ctx, origin),
+        } => handle_bind_game(store, origin, label, params, contract),
+        Request::Sign { game_id, body } => handle_sign(store, origin, game_id, body),
+        Request::ListGames => handle_list_games(store, origin),
     }
 }
 

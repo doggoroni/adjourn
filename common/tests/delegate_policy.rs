@@ -1,4 +1,4 @@
-use adjourn_core::delegate_api::{EntropyQuality, Refusal, Request, Response, Side};
+use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
     HostEntropy, SignDecision, GAME_RECORD_FORMAT,
@@ -125,21 +125,23 @@ fn game() -> (SigningKey, SigningKey, GameParams) {
     (w, b, params)
 }
 
+/// A CLI is not a web app, so the runtime gives it no MessageOrigin. Binding
+/// with `None` must therefore SUCCEED and record `None`.
 #[test]
-fn binding_without_an_origin_is_refused() {
+fn a_game_can_be_bound_with_no_origin_at_all() {
     let (w, _b, params) = game();
-    assert!(matches!(
-        decide_bind(
-            None,
-            "g1",
-            w.verifying_key().to_bytes(),
-            &params,
-            CONTRACT,
-            EntropyQuality::HostBacked,
-            None
-        ),
-        BindDecision::Refuse(Refusal::MissingOrigin)
-    ));
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "g1",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::HostBacked,
+        None,
+    ) else {
+        panic!("a CLI-bound game must be allowed");
+    };
+    assert_eq!(record.origin, None);
 }
 
 #[test]
@@ -175,7 +177,7 @@ fn binding_records_the_side_and_starts_the_ply_counter_at_zero() {
         panic!("expected a bind");
     };
     assert_eq!(record.side, Side::White);
-    assert_eq!(record.origin, ORIGIN);
+    assert_eq!(record.origin, Some(ORIGIN));
     assert_eq!(record.last_signed_ply, 0);
     assert_eq!(record.label, "g1");
 }
@@ -253,6 +255,23 @@ fn white_record() -> GameRecord {
         CONTRACT,
         EntropyQuality::HostBacked,
         Some(ORIGIN),
+    ) else {
+        panic!("expected a bind");
+    };
+    record
+}
+
+/// A game bound the way the CLI binds one: no origin at all.
+fn cli_record() -> GameRecord {
+    let (w, _b, params) = game();
+    let BindDecision::Bind { record } = decide_bind(
+        None,
+        "cli",
+        w.verifying_key().to_bytes(),
+        &params,
+        CONTRACT,
+        EntropyQuality::HostBacked,
+        None,
     ) else {
         panic!("expected a bind");
     };
@@ -411,20 +430,65 @@ fn signing_for_the_wrong_side_is_refused() {
     ));
 }
 
+/// ...and then only a caller with the same (absent) origin may sign.
 #[test]
-fn a_foreign_origin_is_refused() {
+fn a_cli_bound_game_is_signable_with_no_origin() {
+    let record = cli_record();
     assert!(matches!(
-        decide_sign(&white_record(), &mv(1, "e2e4"), Some(OTHER_ORIGIN)),
-        SignDecision::Refuse(Refusal::ForeignOrigin)
+        decide_sign(&record, &mv(1, "e2e4"), None),
+        SignDecision::Sign { .. }
+    ));
+}
+
+/// A web app cannot hijack a CLI-bound game by supplying an origin.
+#[test]
+fn a_web_app_cannot_sign_a_cli_bound_game() {
+    let record = cli_record();
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "e2e4"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+/// And the reverse: a CLI cannot sign a game a web app bound.
+#[test]
+fn a_cli_cannot_sign_a_web_app_bound_game() {
+    let record = white_record(); // bound with Some(ORIGIN)
+    assert!(matches!(
+        decide_sign(&record, &mv(1, "e2e4"), None),
+        SignDecision::Refuse(Refusal::WrongOrigin)
     ));
 }
 
 #[test]
-fn a_missing_origin_is_refused() {
+fn a_different_web_app_is_still_refused() {
     assert!(matches!(
-        decide_sign(&white_record(), &mv(1, "e2e4"), None),
-        SignDecision::Refuse(Refusal::MissingOrigin)
+        decide_sign(&white_record(), &mv(1, "e2e4"), Some(OTHER_ORIGIN)),
+        SignDecision::Refuse(Refusal::WrongOrigin)
     ));
+}
+
+#[test]
+fn rebinding_from_a_different_origin_is_refused() {
+    let (w, _b, params) = game();
+    let existing = white_record();
+    assert!(matches!(
+        decide_bind(
+            Some(&existing),
+            "g1",
+            w.verifying_key().to_bytes(),
+            &params,
+            CONTRACT,
+            EntropyQuality::HostBacked,
+            Some(OTHER_ORIGIN)
+        ),
+        BindDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+#[test]
+fn the_record_format_is_now_two() {
+    assert_eq!(GAME_RECORD_FORMAT, 2);
 }
 
 #[test]
@@ -480,4 +544,58 @@ fn advancing_plies_updates_the_counter() {
         record = sign(&record, &mv(ply, "e2e4"));
         assert_eq!(record.last_signed_ply, ply);
     }
+}
+
+/// GameRecord is the delegate's persistence format: it lives in the secret
+/// store and carries last_signed_ply, the double-sign guard. Nothing else
+/// tests that it survives a round trip, and `origin` just changed shape.
+#[test]
+fn a_game_record_round_trips_through_cbor() {
+    for record in [white_record(), cli_record()] {
+        let mut buf = Vec::new();
+        ciborium::into_writer(&record, &mut buf).expect("encode");
+        let back: GameRecord = ciborium::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(back, record, "GameRecord did not survive CBOR");
+        assert_eq!(back.origin, record.origin, "origin lost its value");
+        assert_eq!(
+            back.last_signed_ply, record.last_signed_ply,
+            "the double-sign guard did not survive"
+        );
+    }
+}
+
+/// `FakeNode::delegate` (in `cli/src/fake.rs`) returns the `Response` value
+/// directly, so `Response::encode`/`decode` -- the real wire path a live node
+/// uses -- is never exercised by the CLI's own test suite. `params` and
+/// `contract` on `GameSummary` are wire format that `session::bound_game`
+/// depends on to recover `GameParams` and the contract id from a label; a
+/// silent CBOR round-trip bug in either field would only surface against a
+/// real Freenet node. Cover it here instead.
+#[test]
+fn a_game_summary_with_params_and_contract_round_trips_through_cbor() {
+    let (_w, _b, params) = game();
+    let summary = GameSummary {
+        label: "g1".into(),
+        public_key: [1u8; 32],
+        game_id: Some([2u8; 32]),
+        side: Some(Side::White),
+        last_signed_ply: 3,
+        entropy: Some(EntropyQuality::HostBacked),
+        params: Some(params.clone()),
+        contract: Some(CONTRACT),
+    };
+    let resp = Response::Games(vec![summary.clone()]);
+
+    let back = Response::decode(&resp.encode()).expect("decode");
+    assert_eq!(back, resp, "GameSummary did not survive CBOR");
+
+    let Response::Games(games) = back else {
+        panic!("expected Games");
+    };
+    assert_eq!(
+        games[0].params.as_ref().map(|p| &p.white),
+        Some(&params.white),
+        "params must survive specifically, not just round-trip by luck"
+    );
+    assert_eq!(games[0].contract, Some(CONTRACT));
 }

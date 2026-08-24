@@ -38,19 +38,28 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked
 
-      - name: Test
-        run: cargo test --workspace --locked
-
-      # The canonical contract build. ubuntu-latest is the reference platform:
-      # `--remap-path-prefix` removes the machine-specific prefixes, but the
-      # path SEPARATOR style still differs between Windows and Linux, so the
-      # bytes — and therefore the contract key — are only comparable within one
-      # OS. Local Windows/macOS builds are for development only.
+      # These two build steps MUST precede `Test`, not follow it. Several CLI
+      # integration tests (`cli/tests/common/mod.rs::contract_wasm()`) read the
+      # compiled contract WASM off disk and silently skip themselves — printing
+      # "skipping" and returning `Ok` — when the file is missing. A skipped
+      # test reports the same `ok` as a passing one, so if the WASM were built
+      # after `Test` (as it used to be), CI would report success while never
+      # actually running `scholars_mate_end_to_end` or
+      # `a_double_sign_attempt_is_refused_by_the_delegate`. Building here
+      # first, and running the reproducibility checks (which `cargo clean`)
+      # only after `Test`, keeps the WASM present when the tests need it.
       #
-      # The script also fails if a build path leaked into the WASM, and asserts
-      # the wasm32 target builds at all: wasmtime has no getrandom backend on
-      # wasm32-unknown-unknown, so a graph containing it produces wasm-bindgen
-      # placeholder imports that cannot be resolved. See freenet/river#241.
+      # ubuntu-latest is the reference platform: `--remap-path-prefix` removes
+      # the machine-specific prefixes, but the path SEPARATOR style still
+      # differs between Windows and Linux, so the bytes — and therefore the
+      # contract key — are only comparable within one OS. Local Windows/macOS
+      # builds are for development only.
+      #
+      # The script also fails if a build path leaked into the WASM, and
+      # asserts the wasm32 target builds at all: wasmtime has no getrandom
+      # backend on wasm32-unknown-unknown, so a graph containing it produces
+      # wasm-bindgen placeholder imports that cannot be resolved. See
+      # freenet/river#241.
       - name: Build contract WASM (canonical)
         run: ./scripts/build-contract.sh
 
@@ -65,22 +74,8 @@ jobs:
             exit 1
           fi
 
-      # A rebuild from clean must produce the same bytes, or the contract key is
-      # not a property of the commit.
-      - name: Assert the build is reproducible
-        run: |
-          WASM=target/wasm32-unknown-unknown/release/adjourn_contract.wasm
-          FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
-          cargo clean
-          ./scripts/build-contract.sh > /dev/null
-          SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
-          echo "first:  $FIRST"
-          echo "second: $SECOND"
-          if [ "$FIRST" != "$SECOND" ]; then
-            echo "contract WASM is not reproducible; the contract key would be unstable"
-            exit 1
-          fi
-
+      # Same reasoning as the contract build above: must precede `Test` so the
+      # CLI tests that need the delegate WASM do not silently skip.
       - name: Build delegate WASM (canonical)
         run: ./scripts/build-delegate.sh
 
@@ -95,13 +90,41 @@ jobs:
             exit 1
           fi
 
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # A rebuild from clean must produce the same bytes, or the contract key is
+      # not a property of the commit. Runs after `Test` on purpose: it deletes
+      # the WASM `Test` depends on via `cargo clean`.
+      - name: Assert the build is reproducible
+        run: |
+          WASM=target/wasm32-unknown-unknown/release/adjourn_contract.wasm
+          FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
+          cargo clean
+          ./scripts/build-contract.sh > /dev/null
+          SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
+          echo "first:  $FIRST"
+          echo "second: $SECOND"
+          if [ "$FIRST" != "$SECOND" ]; then
+            echo "contract WASM is not reproducible; the contract key would be unstable"
+            exit 1
+          fi
+
+      # Self-contained on purpose: the contract's reproducibility step above runs
+      # `cargo clean`, which deletes the delegate WASM built earlier in the job.
+      # This step therefore builds its own first artifact rather than hashing one
+      # a sibling step may have removed -- hashing a missing file yields an empty
+      # FIRST, which can never equal SECOND and fails for the wrong reason.
       - name: Assert the delegate build is reproducible
         run: |
           WASM=target/wasm32-unknown-unknown/release/adjourn_delegate.wasm
+          ./scripts/build-delegate.sh > /dev/null
           FIRST=$(sha256sum "$WASM" | cut -d' ' -f1)
           cargo clean
           ./scripts/build-delegate.sh > /dev/null
           SECOND=$(sha256sum "$WASM" | cut -d' ' -f1)
+          echo "first:  $FIRST"
+          echo "second: $SECOND"
           if [ "$FIRST" != "$SECOND" ]; then
             echo "delegate WASM is not reproducible; the delegate key would be unstable"
             exit 1

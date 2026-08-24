@@ -7,6 +7,7 @@ Untimed correspondence chess as a Freenet decentralized app.
 | `common/` (`adjourn-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
 | `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
+| `cli/` (`adjourn-cli`) | the `adjourn` headless CLI. Loads the compiled contract and delegate WASM off disk, speaks the node's WebSocket API, and drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`. Nearly every flow that touches the delegate or contract lives in `adjourn_cli::session` and is exercised there against `FakeNode`; the one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently). Otherwise `main.rs` is parse-dispatch-render only. |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -323,28 +324,69 @@ machine-specific paths and produces a different, unshippable key.
 - **The `freenet-main-delegate` feature must be declared** by the delegate
   crate, exactly like `freenet-main-contract` — the `#[delegate]` macro
   expands to code gated on it.
+- **The handlers in `lib.rs` are host-testable via the `SecretStore` trait**
+  (`secrets.rs`). `handle_create_game_key`, `handle_bind_game`, `handle_sign`,
+  and `handle_list_games` are generic over `S: SecretStore` rather than tied to
+  `DelegateCtx`, so `cli/src/fake.rs`'s `FakeNode` runs the real handler logic
+  against an in-memory `MemoryStore` off-wasm, with no `wasm32-unknown-unknown`
+  build or wasmtime instance in the loop. Only the `DelegateCtx` impl of
+  `SecretStore` (talking to the real secret store host import) needs the wasm
+  target.
+- **`GameRecord.origin` is `Option<[u8; 32]>`, not `Option<MessageOrigin>`**
+  (`common/src/delegate_policy.rs`) — what is persisted is the origin's
+  derived contract-instance id, not the enum. `Option<MessageOrigin>` is one
+  layer up: the parameter type the runtime hands the delegate's `lib.rs`
+  handlers, which `origin_id()` converts to `Option<[u8; 32]>` before it ever
+  reaches `delegate_policy` or gets stored. The origin binds a bound game to
+  whichever id created it, and `handle_list_games` filters by
+  `load_owner(store, &label) == origin` so one origin cannot enumerate
+  another's labels. A CLI client has no `MessageOrigin` at all — the node
+  passes `origin: None` for a direct WS-API caller — so
+  making the field optional was required, not speculative: with a non-optional
+  field every CLI-issued bind and signature would have been refused outright.
+  The corollary: for a CLI-bound game the origin check provides no isolation
+  between callers, because all CLI callers present the same `None`. The real
+  boundary for a CLI-bound game is that the node's WebSocket API is
+  loopback-only — see "Runtime assumptions, verified" below, which records
+  this confirmed against a live node.
 
 ## Testing
 
-`cargo test --workspace --locked` — 76 tests: 59 in `adjourn-core` (31 algebra
-tests plus 28 delegate-policy tests), 13 contract tests, and 4 delegate adapter
-tests. The algebra tests are the point; they run randomized partitions and
-delivery orders. Keep them green. New state-shape features need a
-corresponding law test, not just a happy-path test.
+`cargo test --workspace --locked` — 108 tests: 73 in `adjourn-core` (16 algebra
+tests, 19 adversarial tests, and 38 delegate-policy tests), 14 contract tests,
+9 delegate adapter tests, and 12 CLI integration tests. The algebra tests are
+the point; they run randomized partitions and delivery orders. Keep them
+green. New state-shape features need a corresponding law test, not just a
+happy-path test.
 
-- `common/tests/algebra.rs` (12) — the monoid laws and the original
+- `common/tests/algebra.rs` (16) — the monoid laws and the original
   adversarial cases.
 - `common/tests/adversarial.rs` (19) — convergence attacks, outcome
   precedence, and the chess edges (promotion, underpromotion, castling
   notation, en passant, repetition).
-- `common/tests/delegate_policy.rs` (28) — the delegate's pure decision
+- `common/tests/delegate_policy.rs` (38) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
-  ply-0 sentinel guard. Runs on any platform.
-- `contracts/adjourn-contract/tests/interface.rs` (13) — the adapter: byte
+  ply-0 sentinel guard, and wire round-trips for `Request`/`Response`/
+  `GameRecord`/`GameSummary` through CBOR. Runs on any platform.
+- `contracts/adjourn-contract/tests/interface.rs` (14) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
-- `delegates/adjourn-delegate/tests/adapter.rs` (4) — CI-only: the secret-store
-  key namespaces never collide.
+- `delegates/adjourn-delegate/tests/adapter.rs` (9) — CI-only. Two groups:
+  the secret-store key namespaces never collide (and a crafted label cannot
+  forge another namespace's prefix), plus dispatch tests that drive
+  `adjourn_delegate::handle` directly — a key created and listed, a label
+  hijack attempt from a different origin refused as `WrongOrigin`, and a
+  double-sign attempt refused through the real dispatch path, not just the
+  policy layer beneath it.
+- `cli/tests/` (12, across `fake_node.rs`, `full_game.rs`, `invite.rs`,
+  `moves.rs`, `setup.rs`) — the CLI's `session.rs` flows run against
+  `FakeNode` (real contract and delegate code, in-memory transport): both
+  players deriving the same contract, a build mismatch refused loudly, a
+  full scholar's-mate game end to end, out-of-turn moves failing before
+  signing, and a double-sign attempt refused by the delegate. Several of
+  these read the compiled contract WASM off disk and skip themselves if it
+  is absent locally -- but panic instead if `CI` is set, so a skip can never
+  masquerade as a pass in CI (see `cli/tests/common/mod.rs::contract_wasm`).
 
 ### Check against the network's own verifier
 
@@ -374,9 +416,70 @@ dev-dependency only and never enters the contract build.
 honest cost of invariant 3; the fast path in `absorb` skips verification only
 when the record is already held byte-for-byte.
 
+## Runtime assumptions, verified
+
+Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
+2026-08-24:
+
+- **`MessageOrigin` is NOT populated for a CLI client.** `adjourn invite
+  accept` successfully bound a game and `adjourn game list` showed it
+  afterward, which is only possible because the delegate accepts `origin:
+  None` (see "the handlers are host-testable via `SecretStore`" above). This
+  confirms the change making `GameRecord.origin` an `Option` was necessary,
+  not speculative — with a non-optional field every bind and every signature
+  from the CLI would have been refused. For CLI-bound games the origin check
+  therefore provides no isolation between callers; the real boundary is the
+  node's loopback-only WebSocket API, not the delegate's origin field.
+- **The delegate and contract execute in wasmtime.** `adjourn init` registered
+  the delegate as `EiLsNrWwx33pKjk9JRfpYYAy3KiPrLum4hYtZLZQJWwy` and `adjourn
+  key new` returned a key, so both modules instantiate and run under the real
+  node. No unresolved-import failure, which is what `getrandom` reaching
+  either dependency graph would have produced.
+- **`freenet_rand` IS provided and supplies real entropy, on this node
+  version.** After the Task 10 output fix, `adjourn key new` was re-run
+  against the same live node:
+
+  ```
+  $ adjourn key new --label entropy-probe
+  entropy-probe: 9ZVkjHbpdPvKkvrfwJCbLC2JrPtVwhWQaGmBAdBW6KKd  entropy: HostBacked
+
+  $ adjourn game list
+  bob  Black  contract FMyx3cuVMktTLPmw9mcQFyD46bqxMJbKWkddTRLPa6bz  last signed ply 0  host-backed entropy
+  ```
+
+  `HostBacked` means `classify_host_entropy`'s two-draw liveness check (see
+  "Delegate" above) saw two different, non-zero draws from the host import —
+  so `freenet_rand` both resolves and returns genuine randomness, rather than
+  the all-zeros a dead source would produce.
+
+  This is the difference between the two security properties the design
+  distinguishes for a freshly generated per-game key:
+  - **`HostBacked`** — the key is unpredictable even to a UI that is hostile
+    at the moment of creation. The strong property, and the one that holds
+    here.
+  - **`Degraded`** (had it come back this way) — the key is derived solely
+    from caller-supplied entropy, so a caller that retained its own
+    contribution could recompute the private key. Safe only against a UI
+    compromised *later*, not at creation time.
+
+  The `Degraded` path and its warning stay exactly as written: it is a real
+  fallback for a node/host that behaves differently, and the fail-closed
+  branch (no host entropy *and* no caller entropy) is what stops a key ever
+  being minted from nothing. This result is one measurement, on one node
+  version, on one date — `freenet 0.2.130`, 2026-08-24 — not a guarantee
+  about every node version. That is why it is recorded with both attached
+  rather than asserted as a permanent property of the platform.
+- **A node started with plain `nohup` does not survive the shell; `setsid
+  nohup ... < /dev/null &` does.** Confirmed twice now: once when the bind
+  went through in the first live run, and again when a node started this way
+  in an earlier session was found still running after the session that
+  started it had ended. See `docs/runbook-two-nodes.md`.
+
 ## Roadmap
 
 1. `ContractInterface` wrapper (`validate_state` → `all_valid`, `update_state`
    → `merge`, plus `summarize_state` / `get_state_delta`)
 2. Delegate holding the per-game signing key; UI never sees it
-3. UI over the WebSocket API: `get`, `subscribe`, `update`
+3. UI over the WebSocket API: `get`, `subscribe`, `update` — done for
+   everything except `watch` (see `docs/runbook-two-nodes.md`); `watch` needs
+   a streaming `NodeClient` method that does not exist yet.
