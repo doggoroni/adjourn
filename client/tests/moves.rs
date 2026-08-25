@@ -1,7 +1,7 @@
 mod common;
 
-use adjourn_cli::fake::{shared_world, FakeNode};
-use adjourn_cli::session::{
+use adjourn_client::fake::{shared_world, FakeNode};
+use adjourn_client::session::{
     draw_claim, game_bind, invite_accept, invite_new, play_move, show_label, sign_move_at_ply,
 };
 use adjourn_core::delegate_api::Side;

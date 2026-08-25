@@ -1,8 +1,8 @@
 mod common;
 
-use adjourn_cli::fake::{shared_world, FakeNode};
-use adjourn_cli::node::NodeClient;
-use adjourn_cli::session::{game_bind, invite_accept, invite_new, play_move, show_label};
+use adjourn_client::fake::{shared_world, FakeNode};
+use adjourn_client::node::NodeClient;
+use adjourn_client::session::{game_bind, invite_accept, invite_new, play_move, show_label};
 use adjourn_core::delegate_api::Side;
 use adjourn_core::{GameState, Reason};
 use shakmaty::Color;

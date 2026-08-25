@@ -1,7 +1,7 @@
 mod common;
 
-use adjourn_cli::fake::{shared_world, FakeNode};
-use adjourn_cli::session::{game_bind, invite_accept, invite_new};
+use adjourn_client::fake::{shared_world, FakeNode};
+use adjourn_client::session::{game_bind, invite_accept, invite_new};
 use adjourn_core::delegate_api::Side;
 use freenet_stdlib::prelude::ContractInstanceId;
 

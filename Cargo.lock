@@ -6,9 +6,8 @@ version = 4
 name = "adjourn-cli"
 version = "0.1.0"
 dependencies = [
- "adjourn-contract",
+ "adjourn-client",
  "adjourn-core",
- "adjourn-delegate",
  "anyhow",
  "bs58",
  "ciborium",
@@ -22,6 +21,26 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "adjourn-client"
+version = "0.1.0"
+dependencies = [
+ "adjourn-contract",
+ "adjourn-core",
+ "adjourn-delegate",
+ "anyhow",
+ "bs58",
+ "ciborium",
+ "ed25519-dalek",
+ "freenet-stdlib",
+ "rand",
+ "serde",
+ "serde_bytes",
+ "shakmaty",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

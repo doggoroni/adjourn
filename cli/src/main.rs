@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use adjourn_cli::invite::{GameOffer, Invite};
-use adjourn_cli::node::{delegate_container, NodeClient, WsClient};
+use adjourn_cli::node::{delegate_container, NodeClient};
 use adjourn_cli::session;
+use adjourn_cli::ws::WsClient;
 use adjourn_core::delegate_api::{Request, Response, Side};
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand, ValueEnum};

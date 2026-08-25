@@ -17,7 +17,7 @@ use adjourn_core::delegate_api::{EntropyQuality, GameSummary};
 use adjourn_core::{Decision, Reason, Status};
 use freenet_stdlib::prelude::ContractInstanceId;
 
-use adjourn_cli::invite::{GameOffer, Invite};
+use adjourn_client::invite::{GameOffer, Invite};
 
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_REFUSAL: u8 = 1;
@@ -53,7 +53,7 @@ pub fn report_error(err: &anyhow::Error) -> ExitCode {
 /// an `io::Error` reaching the node layer at all arrives already wrapped in
 /// `tokio_tungstenite::tungstenite::Error`, which this function does catch.
 ///
-/// A `RESPONSE_TIMEOUT` elapsing (`cli/src/node.rs::recv_timeout`) belongs in
+/// A `RESPONSE_TIMEOUT` elapsing (`cli/src/ws.rs::recv_timeout`) belongs in
 /// this bucket too: a node that accepted the connection but never answers is
 /// exactly the same class of failure as one that dropped the socket outright
 /// -- the node/delegate never got far enough to decline the request. That
