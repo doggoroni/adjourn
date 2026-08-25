@@ -83,7 +83,7 @@ fire on their own.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 138 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 13 CLI)
+cargo test --workspace --locked     # 140 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 15 adjourn-client)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 
@@ -126,17 +126,22 @@ and a sync summary is exactly 64 bytes per record.
 1. ~~Wrap in `ContractInterface`~~ — done, `contracts/adjourn-contract`.
 2. ~~Delegate holding the per-game signing key; UI never sees it~~ — done,
    `delegates/adjourn-delegate`.
-3. UI over the WebSocket API: `get`, `subscribe`, `update`.
-   - ~~3a. Freenet client layer~~ — done, `cli/src/node.rs` (`NodeClient`,
-     `WsClient`, `FakeNode`).
-   - ~~3b. Game session flow~~ — done, `cli/src/session.rs`, driven by the
-     `adjourn` headless CLI (`cli/`): `init`, `key`, `invite`, `game`, `move`,
-     `show`, `resign`, `draw`. `watch` is the one command still missing — it
-     needs a streaming `NodeClient` method that does not exist yet, so it
-     errors out rather than hanging; poll with `adjourn show` instead. See
-     `docs/runbook-two-nodes.md` for how to run two nodes and play a game
-     end-to-end, and `CLAUDE.md`'s "Runtime assumptions, verified" for what
-     has actually been confirmed against a live node so far.
+3. UI over the WebSocket API: `get`, `subscribe`, `update`, `watch` — all done.
+   - ~~3a. Freenet client layer~~ — done, `client/src/node.rs` (`NodeClient`,
+     `FakeNode`; `WsClient` is `cli/src/ws.rs`, the tungstenite transport).
+   - ~~3b. Game session flow~~ — done, `client/src/session.rs`, a
+     transport-independent crate (`adjourn-client`) driven by the `adjourn`
+     headless CLI (`cli/`): `init`, `key`, `invite`, `game`, `move`, `show`,
+     `resign`, `draw`, `watch`. The session flows moved out of `cli/` into
+     their own crate specifically so a browser UI could reach them without
+     pulling in `tokio-tungstenite` — see `CLAUDE.md`'s crate table for why.
+   - ~~3c. `watch`~~ — done, backed by `NodeClient::next_update`. Streams
+     updates rather than polling; see `docs/runbook-two-nodes.md` for how to
+     run two nodes and play a game end-to-end, and `CLAUDE.md`'s "Client"
+     section and "Runtime assumptions, verified" for what has actually been
+     confirmed against a live node so far. `watch` has no automated test
+     against a real node — the mechanism is covered by
+     `client/tests/updates.rs` against `FakeNode` only.
 
 Deferred by design: timers, matchmaking, ratings.
 

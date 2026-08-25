@@ -7,10 +7,26 @@ Untimed correspondence chess as a Freenet decentralized app.
 | `common/` (`adjourn-core`) | the state algebra. **No Freenet dependencies** — the consistency model is testable standalone, and CI asserts the dependency graph stays clean. |
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter. Bytes in, bytes out; no logic of its own. |
 | `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
-| `cli/` (`adjourn-cli`) | the `adjourn` headless CLI. Loads the compiled contract and delegate WASM off disk, speaks the node's WebSocket API, and drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`. Nearly every flow that touches the delegate or contract lives in `adjourn_cli::session` and is exercised there against `FakeNode`; the one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently). Otherwise `main.rs` is parse-dispatch-render only. |
+| `client/` (`adjourn-client`) | the game flows (`session.rs`, `invite.rs`), transport-independent — generic over `node::NodeClient` rather than tied to any one WebSocket implementation. `FakeNode` (real contract and delegate code, in-memory transport) lives here too, behind a default-on `fake` feature the UI turns off. |
+| `cli/` (`adjourn-cli`) | the `adjourn` headless CLI: the tungstenite `NodeClient` impl (`ws.rs`), argument parsing, and rendering. It drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`/`watch` by calling into `adjourn_client::session`; it no longer holds the flows itself. The one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently) — otherwise `main.rs` is parse-dispatch-render only. |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
+
+`adjourn-client` exists to be shared, not to be reused for its own sake: both
+players must derive byte-identical `GameParams`, or they land on different
+contract ids and each sees a game the other never joins, with **no error
+anywhere** to signal the split. One implementation of the flows is the only way
+to be sure both sides compute params the same way — and a browser cannot reach
+those flows while they live in a crate that pulls in `tokio-tungstenite`, which
+is why they were pulled out of `cli/` and into a crate with no transport
+dependency of its own. `FakeNode` rides along behind the `fake` feature
+(default-on) so the UI can build with `default-features = false` and keep the
+contract and delegate crates — and their WASM toolchains — out of its own
+build; co-building them in one cargo invocation is also how feature
+unification could change the *contract's* emitted bytes, which the
+reproducible-builds section below treats as unacceptable for the actual
+shipped contract.
 
 ## Read before changing anything
 
@@ -398,6 +414,51 @@ contract version.
   `tracing-subscriber` unconditionally, which pulls `windows-sys` on Windows.
   The wasm32 target does not.
 
+## Client
+
+`client/src/session.rs` funnels every move-flow command through `open_game`,
+which resolves the bound game, checks this build's contract WASM derives the
+same contract id the delegate recorded at bind time, then GETs and projects
+the current state. `open_game`'s GET deliberately does **not** subscribe.
+Eight commands share it — `play_move`, `resign`, `show_label`, the draw
+commands, and the rest — and every one of them is a one-shot: it reads state,
+maybe signs and submits a record, and returns. If `open_game` subscribed, each
+of those would leave a subscription behind it that nothing ever tears down.
+
+`watch_label` is the one flow that needs a subscription, so it asks for its
+own: after calling `open_game` it issues a second, subscribing GET
+(`node.get(id, true)`) before entering its update loop. **This is worth
+calling out because of how the omission was found, not just what the fix is.**
+`watch` originally never subscribed. Against a real node it rendered the
+opening position once and then blocked on `next_update` forever —
+indistinguishable, from the outside, from a healthy idle game waiting on the
+opponent. No test caught it, because `FakeNode` ignored the subscribe flag
+entirely and handed out updates from a shared log regardless of who had asked
+to watch. `FakeNode` now tracks subscriptions per node (`subscribed:
+BTreeSet<[u8; 32]>` in `client/src/fake.rs`) and `next_update` only yields
+entries for contracts that node subscribed to via `get(.., true)` — so a
+future command that forgets to subscribe fails a test instead of failing
+silently against a live node. It is the same argument the rest of this file
+already makes for `FakeNode` running the real contract and delegate code: a
+fake that grants a permission the real node requires is only testing the
+happy path, and is worse than no fake at all.
+
+`node::NodeClient::next_update` has no request timeout, unlike every other
+method on the trait (`get`, `put`, `update`, `delegate`), which are bounded by
+the 30-second `RESPONSE_TIMEOUT`. That asymmetry is deliberate: a
+correspondence move can legitimately take days, so a timeout on `next_update`
+would report a healthy idle game as a failure — exactly the outcome the other
+methods' timeout exists to prevent for an unresponsive node. Its doc comment
+also has to be read per-implementation: `Ok(None)` means "nothing waiting" for
+`FakeNode`, which drains a finite in-memory log, but `WsClient` blocks on the
+socket's `recv()` and has no such log to exhaust, so for a real node this call
+either yields an update or does not return — it can never produce `None`.
+
+`watch` has no automated test against a real node. The subscribe-then-loop
+mechanism is covered by `client/tests/updates.rs` against `FakeNode`; the
+CLI's argument parsing and rendering for `adjourn watch` is not exercised by
+any test, automated or otherwise.
+
 ## Delegate
 
 `delegates/adjourn-delegate/` holds the per-game signing key and enforces one
@@ -425,7 +486,7 @@ machine-specific paths and produces a different, unshippable key.
 - **The handlers in `lib.rs` are host-testable via the `SecretStore` trait**
   (`secrets.rs`). `handle_create_game_key`, `handle_bind_game`, `handle_sign`,
   and `handle_list_games` are generic over `S: SecretStore` rather than tied to
-  `DelegateCtx`, so `cli/src/fake.rs`'s `FakeNode` runs the real handler logic
+  `DelegateCtx`, so `client/src/fake.rs`'s `FakeNode` runs the real handler logic
   against an in-memory `MemoryStore` off-wasm, with no `wasm32-unknown-unknown`
   build or wasmtime instance in the loop. Only the `DelegateCtx` impl of
   `SecretStore` (talking to the real secret store host import) needs the wasm
@@ -450,12 +511,12 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 138 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 140 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
-9 delegate adapter tests, and 13 CLI integration tests. The algebra tests are
-the point; they run randomized partitions and delivery orders. Keep them
-green. New state-shape features need a corresponding law test, not just a
-happy-path test.
+9 delegate adapter tests, and 15 `adjourn-client` integration tests. The
+algebra tests are the point; they run randomized partitions and delivery
+orders. Keep them green. New state-shape features need a corresponding law
+test, not just a happy-path test.
 
 - `common/tests/algebra.rs` (24) — the monoid laws and the original
   adversarial cases.
@@ -478,15 +539,20 @@ happy-path test.
   hijack attempt from a different origin refused as `WrongOrigin`, and a
   double-sign attempt refused through the real dispatch path, not just the
   policy layer beneath it.
-- `cli/tests/` (13, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs` 4,
-  `moves.rs` 4, `setup.rs` 2) — the CLI's `session.rs` flows run against
-  `FakeNode` (real contract and delegate code, in-memory transport): both
-  players deriving the same contract, a build mismatch refused loudly, a
-  full scholar's-mate game end to end, out-of-turn moves failing before
-  signing, and a double-sign attempt refused by the delegate. Several of
-  these read the compiled contract WASM off disk and skip themselves if it
-  is absent locally -- but panic instead if `CI` is set, so a skip can never
-  masquerade as a pass in CI (see `cli/tests/common/mod.rs::contract_wasm`).
+- `client/tests/` (15, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs`
+  4, `moves.rs` 4, `setup.rs` 2, `updates.rs` 2) — `adjourn_client::session`'s
+  flows run against `FakeNode` (real contract and delegate code, in-memory
+  transport): both players deriving the same contract, a build mismatch
+  refused loudly, a full scholar's-mate game end to end, out-of-turn moves
+  failing before signing, a double-sign attempt refused by the delegate, and
+  (`updates.rs`) `watch_label`'s subscribe-then-loop against `FakeNode`'s
+  per-node subscription tracking — see "Client" above. These flow tests moved
+  here from `cli/tests/` when the session logic was extracted into
+  `adjourn-client`; the CLI crate itself no longer has a `tests/` directory.
+  Several of these read the compiled contract WASM off disk and skip
+  themselves if it is absent locally -- but panic instead if `CI` is set, so a
+  skip can never masquerade as a pass in CI (see
+  `client/tests/common/mod.rs::contract_wasm`).
 
 ### Check against the network's own verifier
 
@@ -621,6 +687,11 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
 1. `ContractInterface` wrapper (`validate_state` → `all_valid`, `update_state`
    → `merge`, plus `summarize_state` / `get_state_delta`)
 2. Delegate holding the per-game signing key; UI never sees it
-3. UI over the WebSocket API: `get`, `subscribe`, `update` — done for
-   everything except `watch` (see `docs/runbook-two-nodes.md`); `watch` needs
-   a streaming `NodeClient` method that does not exist yet.
+3. UI over the WebSocket API: `get`, `subscribe`, `update`, `watch` — all
+   done. `watch` is backed by `NodeClient::next_update`, which is
+   deliberately unbounded by the 30-second `RESPONSE_TIMEOUT` every other
+   `NodeClient` method carries: a correspondence move can legitimately take
+   days, and a timeout would report a healthy idle game as a failure. See
+   "Client" above for the subscription requirement this uncovered and for the
+   corresponding gap — `watch` is covered against `FakeNode`, not against a
+   real node.

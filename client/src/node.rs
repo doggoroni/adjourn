@@ -25,8 +25,13 @@ pub trait NodeClient {
     async fn update(&mut self, key: ContractKey, delta: Vec<u8>) -> anyhow::Result<()>;
     async fn delegate(&mut self, req: Request) -> anyhow::Result<Response>;
 
-    /// The next update notification for a contract this client subscribed to,
-    /// or `None` if there is nothing waiting.
+    /// The next update notification for a contract this client subscribed to.
+    ///
+    /// `Ok(None)` means "nothing waiting" for `FakeNode`, which drains a
+    /// shared in-memory log and returns once it is empty. `WsClient` has no
+    /// such log to exhaust — it blocks on the socket's `recv()` — so for a
+    /// real node this call can never return `None`; it either yields an
+    /// update or does not return.
     ///
     /// Deliberately NOT bounded by a request timeout. A correspondence move can
     /// legitimately take days, so a timeout here would report a healthy idle
