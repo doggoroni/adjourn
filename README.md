@@ -150,11 +150,11 @@ identifier in the system:
   no format version field, so any future change is still a hard break rather
   than a negotiated one — and `Body::DrawClaim` plus the `ply` field on the
   draw bodies were exactly such a break, so the contract key has rotated again.
-- **`fdev conformance` has not been re-run since that break.** The last
-  recorded result predates it, against states that no longer decode as what
-  they were, and it exercised none of eviction, `MAX_PLY`, draw claims or the
-  structural forfeit. See `CLAUDE.md`, "Check against the network's own
-  verifier".
+- **`fdev conformance` is current: 19 states, 817 cases, 817 held, 0
+  violations**, run against the post-break wire format on 2026-08-25. The
+  corpus generator is committed (`cargo run -p adjourn-core --example
+  dump_corpus`), so it can be rebuilt the next time the format moves. See
+  `CLAUDE.md`, "Check against the network's own verifier".
 
 Treat published contract keys as ephemeral until this section says otherwise.
 

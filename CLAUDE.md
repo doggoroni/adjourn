@@ -493,9 +493,18 @@ happy-path test.
 `fdev conformance` runs the *same* verifier freenet-core runs, over a corpus of
 real states, and it catches things our own tests structurally cannot:
 
+The corpus generator is committed, because the corpus has to be rebuilt on
+every wire-format change and the previous one lived only in a throwaway
+working copy — which is why the pre-`algebra` result could not be reproduced.
+
 ```sh
-fdev conformance   --wasm target/wasm32-unknown-unknown/release/adjourn_contract.wasm   --params params.bin --state state_a.bin --state state_b.bin ...
+cargo run -p adjourn-core --example dump_corpus -- corpus/
+fdev conformance   --wasm target/wasm32-unknown-unknown/release/adjourn_contract.wasm   --params corpus/params.bin   $(for s in corpus/state_*.bin; do printf -- "--state %s " "$s"; done)   --max-cases 20000
 ```
+
+`--max-cases` matters: the default is 512, which this corpus exceeds, so the
+default silently *samples* instead of exhausting. At 20000 the run terminates
+on its own at 817 cases — that number is the corpus fully explored, not a cap.
 
 It found `self_delta_empty` — `get_state_delta` returned a CBOR-encoded empty
 list (one byte, `0x80`) instead of zero bytes, so freenet-core's "empty delta ->
@@ -524,17 +533,21 @@ actually got compared or sent."
 Feed it partial and adversarial states, not just happy games -- the merge laws
 only bite when peers hold different fragments.
 
-**Status: STALE, needs a re-run.** The last recorded result — 348 cases, 348
-held, 0 violations — was taken BEFORE the `algebra` branch. That branch rotated
-the wire format (`Body::DrawClaim`, the `ply` field on the draw bodies), so
-those corpus states no longer decode as the states they were recorded as, and
-the contract key rotated with them. Nothing in that corpus exercises top-K
-eviction, `MAX_PLY`, draw claims, or the structural double-sign forfeit either.
-Treat the number as history, not as a current claim: rebuild the corpus against
-this branch's contract and re-run before shipping. The corpus should include
-over-K states (which `validate_state` accepts and the three read paths
-normalize), states holding two `Move` records in one group, and partial states
-split so that each peer holds a different half of an eviction group.
+**Status: 19 states, 817 cases, 817 held, 0 violations** — against the
+post-`algebra` wire format, `fdev` 0.3.292 / freenet 0.2.130, 2026-08-25.
+Contract `Gnp1PdFr2chgGpzEhKqZ8Cd4pEXvcqV1FPC49VESrsyE`, code hash
+`D8xBvq5UCFSPxQXogtynvXLwDXmD55C7Tuq9NsGM3Bfm`. The corpus is weighted toward
+partial and adversarial states — overlapping fragments of one game, a crafted
+over-K group, the double-sign and substitution shapes, stale and live draw
+records, a claim, a record at `MAX_PLY`, and the two-valid-signatures
+collision — because merge only has work to do when peers hold different
+fragments.
+
+The generator refuses to emit two byte-identical states. That is not tidiness:
+`fdev` deduplicates silently, and signing is deterministic, so a one-move
+`e2e4` state built through `make_move` is the same bytes as one signed by hand.
+The first run of this corpus reported 18 states for 19 files and said nothing
+about the difference.
 
 The `hazmat` dev-dependency on ed25519-dalek exists so the tests can forge a
 *second valid* signature over one body — the case invariant 4 is about. It is a
