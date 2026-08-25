@@ -101,7 +101,11 @@ fn merge_and_filter_commute() {
         spam.push(Record::sign(
             &w,
             &params,
-            Body::Move { ply: 5, parent, uci: "g1f3".into() },
+            Body::Move {
+                ply: 5,
+                parent,
+                uci: "g1f3".into(),
+            },
         ));
     }
 
@@ -192,8 +196,22 @@ fn stale_draw_offer_is_ignored() {
     let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]);
     let chain = project(&state, &params).chain;
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: 2, at: chain[1] });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: 2, offer: offer.id() });
+    let offer = Record::sign(
+        &b,
+        &params,
+        Body::DrawOffer {
+            ply: 2,
+            at: chain[1],
+        },
+    );
+    let accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: 2,
+            offer: offer.id(),
+        },
+    );
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -215,8 +233,22 @@ fn draw_offer_at_the_current_head_is_accepted() {
     let chain_len = project(&state, &params).chain.len() as u16;
     let head = *project(&state, &params).chain.last().unwrap();
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: chain_len, at: head });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: chain_len, offer: offer.id() });
+    let offer = Record::sign(
+        &b,
+        &params,
+        Body::DrawOffer {
+            ply: chain_len,
+            at: head,
+        },
+    );
+    let accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: chain_len,
+            offer: offer.id(),
+        },
+    );
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -247,8 +279,22 @@ fn accepting_and_then_moving_voids_your_own_acceptance() {
     let chain_len = project(&state, &params).chain.len() as u16;
     let head = *project(&state, &params).chain.last().unwrap();
 
-    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: chain_len, at: head });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: chain_len, offer: offer.id() });
+    let offer = Record::sign(
+        &b,
+        &params,
+        Body::DrawOffer {
+            ply: chain_len,
+            at: head,
+        },
+    );
+    let accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: chain_len,
+            offer: offer.id(),
+        },
+    );
 
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
@@ -639,22 +685,39 @@ fn a_record_beyond_max_ply_is_not_valid() {
     let ok = Record::sign(
         &w,
         &params,
-        Body::Move { ply: adjourn_core::types::MAX_PLY, parent: params.genesis(), uci: "e2e4".into() },
+        Body::Move {
+            ply: adjourn_core::types::MAX_PLY,
+            parent: params.genesis(),
+            uci: "e2e4".into(),
+        },
     );
-    assert!(ok.verify(&params), "a record at exactly MAX_PLY must stay valid");
+    assert!(
+        ok.verify(&params),
+        "a record at exactly MAX_PLY must stay valid"
+    );
 
     let too_far = Record::sign(
         &w,
         &params,
-        Body::Move { ply: adjourn_core::types::MAX_PLY + 1, parent: params.genesis(), uci: "e2e4".into() },
+        Body::Move {
+            ply: adjourn_core::types::MAX_PLY + 1,
+            parent: params.genesis(),
+            uci: "e2e4".into(),
+        },
     );
-    assert!(!too_far.verify(&params), "ply > MAX_PLY must be structurally invalid");
+    assert!(
+        !too_far.verify(&params),
+        "ply > MAX_PLY must be structurally invalid"
+    );
 
     // The cap is structural, so it must also refuse a state built from such a
     // record -- not merely ignore it at projection.
     let mut state = GameState::empty();
     state.insert_verified(&too_far, &params);
-    assert!(state.is_empty(), "an over-MAX_PLY record must never enter state");
+    assert!(
+        state.is_empty(),
+        "an over-MAX_PLY record must never enter state"
+    );
 }
 
 #[test]
@@ -663,9 +726,15 @@ fn the_ply_cap_applies_to_draw_records_too() {
     let rec = Record::sign(
         &w,
         &params,
-        Body::DrawOffer { ply: adjourn_core::types::MAX_PLY + 1, at: params.genesis() },
+        Body::DrawOffer {
+            ply: adjourn_core::types::MAX_PLY + 1,
+            at: params.genesis(),
+        },
     );
-    assert!(!rec.verify(&params), "draw records carry a ply and are capped too");
+    assert!(
+        !rec.verify(&params),
+        "draw records carry a ply and are capped too"
+    );
 }
 
 #[test]
@@ -673,8 +742,16 @@ fn resign_has_no_ply_and_one_possible_id() {
     let (w, _b, params) = keys();
     let a = Record::sign(&w, &params, Body::Resign);
     let b = Record::sign(&w, &params, Body::Resign);
-    assert_eq!(a.body.ply(), None, "Resign is a unit variant: no ply to group on");
-    assert_eq!(a.id(), b.id(), "one signer has exactly one possible Resign id");
+    assert_eq!(
+        a.body.ply(),
+        None,
+        "Resign is a unit variant: no ply to group on"
+    );
+    assert_eq!(
+        a.id(),
+        b.id(),
+        "one signer has exactly one possible Resign id"
+    );
 }
 
 #[test]
@@ -714,11 +791,31 @@ fn flooding_draw_offers_cannot_evict_a_move_at_the_same_ply() {
 #[test]
 fn a_buried_double_sign_still_forfeits() {
     let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
-    let head = project(&state, &params).chain.last().copied().expect("head");
+    let head = project(&state, &params)
+        .chain
+        .last()
+        .copied()
+        .expect("head");
 
     // Two genuinely different legal moves at ply 3: the fraud.
-    let a = Record::sign(&w, &params, Body::Move { ply: 3, parent: head, uci: "g1f3".into() });
-    let b = Record::sign(&w, &params, Body::Move { ply: 3, parent: head, uci: "b1c3".into() });
+    let a = Record::sign(
+        &w,
+        &params,
+        Body::Move {
+            ply: 3,
+            parent: head,
+            uci: "g1f3".into(),
+        },
+    );
+    let b = Record::sign(
+        &w,
+        &params,
+        Body::Move {
+            ply: 3,
+            parent: head,
+            uci: "b1c3".into(),
+        },
+    );
 
     let mut fraud = state.clone();
     fraud.merge(&raw_state(&[a.clone(), b.clone()]), &params);
@@ -735,7 +832,15 @@ fn a_buried_double_sign_still_forfeits() {
     for i in 0..64u64 {
         let mut parent = [0u8; 32];
         parent[..8].copy_from_slice(&i.to_le_bytes());
-        junk.push(Record::sign(&w, &params, Body::Move { ply: 3, parent, uci: "e2e4".into() }));
+        junk.push(Record::sign(
+            &w,
+            &params,
+            Body::Move {
+                ply: 3,
+                parent,
+                uci: "e2e4".into(),
+            },
+        ));
     }
     buried.merge(&raw_state(&junk), &params);
 
@@ -884,21 +989,23 @@ fn retroactive_move_substitution_forfeits() {
     assert_eq!(project(&s, &params).ply, 5, "the real move is on the chain");
 
     // A different LEGAL ply-5 move whose id sorts below the real one.
-    let alt = ["h2h3", "a2a3", "d2d3", "b1c3", "f3g5", "f1c4", "f1e2", "f1d3"]
-        .iter()
-        .map(|uci| {
-            Record::sign(
-                &w,
-                &params,
-                Body::Move {
-                    ply: 5,
-                    parent: head,
-                    uci: (*uci).into(),
-                },
-            )
-        })
-        .find(|rec| rec.id() < real.id())
-        .expect("some legal alternative sorts below the real move");
+    let alt = [
+        "h2h3", "a2a3", "d2d3", "b1c3", "f3g5", "f1c4", "f1e2", "f1d3",
+    ]
+    .iter()
+    .map(|uci| {
+        Record::sign(
+            &w,
+            &params,
+            Body::Move {
+                ply: 5,
+                parent: head,
+                uci: (*uci).into(),
+            },
+        )
+    })
+    .find(|rec| rec.id() < real.id())
+    .expect("some legal alternative sorts below the real move");
 
     // ...and a wrong-parent junk record, also below it, to fill the group.
     let junk = junk_below(&w, &params, 5, "e2e4", real.id().min(alt.id()))
@@ -926,7 +1033,10 @@ fn retroactive_move_substitution_forfeits() {
         "the substituting player loses, rather than getting a free takeback"
     );
     assert_eq!(st.ply, 4, "the chain stops before the rewritten ply");
-    assert_eq!(st.fen, before.fen, "and the board is the last agreed position");
+    assert_eq!(
+        st.fen, before.fen,
+        "and the board is the last agreed position"
+    );
 }
 
 /// The same rewind, aimed at a draw record instead of the board: pull the head
@@ -937,11 +1047,22 @@ fn retroactive_move_substitution_forfeits() {
 #[test]
 fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
     let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3"]);
-    let head_at_3 = project(&state, &params).chain.last().copied().expect("head");
+    let head_at_3 = project(&state, &params)
+        .chain
+        .last()
+        .copied()
+        .expect("head");
 
     // Black offers a draw at ply 3; it is Black to answer, so the offer is live
     // only while ply 3 is the head.
-    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: 3, at: head_at_3 });
+    let offer = Record::sign(
+        &b,
+        &params,
+        Body::DrawOffer {
+            ply: 3,
+            at: head_at_3,
+        },
+    );
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
 
@@ -953,7 +1074,14 @@ fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
 
     // White, now wanting out, accepts the STALE offer and rewinds ply 5 so
     // that ply 3 is the head again.
-    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: 5, offer: offer.id() });
+    let accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: 5,
+            offer: offer.id(),
+        },
+    );
     assert!(s.insert_verified(&accept, &params));
     assert_eq!(
         project(&s, &params).decision,
@@ -962,8 +1090,8 @@ fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
     );
 
     let junk_a = junk_below(&w, &params, 5, "e2e4", real.id()).expect("junk below");
-    let junk_b = junk_below(&w, &params, 5, "d2d4", real.id().min(junk_a.id()))
-        .expect("second junk below");
+    let junk_b =
+        junk_below(&w, &params, 5, "d2d4", real.id().min(junk_a.id())).expect("second junk below");
     let mut attacked = s.clone();
     attacked.merge(&raw_state(&[junk_a, junk_b]), &params);
     assert!(
@@ -999,12 +1127,26 @@ fn a_threefold_claim_at_the_head_draws_the_game() {
     let (state, params, w, _b) = play(THREEFOLD_LINE);
     let status = project(&state, &params);
     assert!(status.repetitions >= 3, "the line must actually repeat");
-    assert!(status.decision.is_none(), "threefold alone does not end the game");
+    assert!(
+        status.decision.is_none(),
+        "threefold alone does not end the game"
+    );
 
     // White is to move at the head, so White is the one who may claim.
-    assert_eq!(status.turn, Color::White, "this line ends with white to move");
+    assert_eq!(
+        status.turn,
+        Color::White,
+        "this line ends with white to move"
+    );
     let head = status.chain.last().copied().expect("head");
-    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &w,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
 
     let mut claimed = state.clone();
     assert!(claimed.insert_verified(&claim, &params));
@@ -1014,7 +1156,11 @@ fn a_threefold_claim_at_the_head_draws_the_game() {
         Some(Reason::ThreefoldClaim),
         "a valid claim at the head draws"
     );
-    assert_eq!(after.decision.and_then(|d| d.winner), None, "a claim is a draw");
+    assert_eq!(
+        after.decision.and_then(|d| d.winner),
+        None,
+        "a claim is a draw"
+    );
 }
 
 #[test]
@@ -1022,12 +1168,22 @@ fn a_claim_with_no_valid_ground_is_ignored_not_fatal() {
     let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
     let status = project(&state, &params);
     let head = status.chain.last().copied().expect("head");
-    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &w,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
 
     let mut claimed = state.clone();
     assert!(claimed.insert_verified(&claim, &params));
     let after = project(&claimed, &params);
-    assert_eq!(after.decision, None, "no repetition, no fifty-move: ignored");
+    assert_eq!(
+        after.decision, None,
+        "no repetition, no fifty-move: ignored"
+    );
     assert_eq!(after.ply, status.ply, "and the game is otherwise untouched");
 }
 
@@ -1036,7 +1192,14 @@ fn a_stale_claim_is_ignored() {
     let (state, params, w, _b) = play(THREEFOLD_LINE);
     let status = project(&state, &params);
     let head = status.chain.last().copied().expect("head");
-    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &w,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
 
     // The claimant moves instead of standing on the claim, advancing the head.
     // Only the claimant can do this -- which is precisely why a claim has no
@@ -1060,10 +1223,31 @@ fn a_valid_claim_outranks_a_pending_draw_agreement() {
     let head = status.chain.last().copied().expect("head");
 
     // Black offers, white accepts -- a complete, live agreement.
-    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: status.ply, at: head });
-    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: status.ply, offer: offer.id() });
+    let offer = Record::sign(
+        &b,
+        &params,
+        Body::DrawOffer {
+            ply: status.ply,
+            at: head,
+        },
+    );
+    let accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: status.ply,
+            offer: offer.id(),
+        },
+    );
     // White, who is to move, also claims the threefold.
-    let claim = Record::sign(&w, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &w,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
 
     let mut both = state.clone();
     for rec in [&offer, &accept, &claim] {
@@ -1089,7 +1273,14 @@ fn only_the_player_to_move_may_claim() {
 
     // Black is NOT to move, so black's claim must not count -- otherwise the
     // player to move could void it by moving, reintroducing a race.
-    let claim = Record::sign(&b, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &b,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
     let mut claimed = state.clone();
     assert!(claimed.insert_verified(&claim, &params));
     assert_eq!(project(&claimed, &params).decision, None);
@@ -1113,7 +1304,14 @@ fn a_claim_does_not_disturb_a_checkmate() {
     let head = status.chain.last().copied().expect("head");
 
     // Black is the mated player, and therefore the player "to move".
-    let claim = Record::sign(&b, &params, Body::DrawClaim { ply: status.ply, at: head });
+    let claim = Record::sign(
+        &b,
+        &params,
+        Body::DrawClaim {
+            ply: status.ply,
+            at: head,
+        },
+    );
     let mut claimed = state.clone();
     claimed.insert_verified(&claim, &params);
 
@@ -1142,7 +1340,15 @@ fn ignored_counts_illegal_moves_but_not_resignations() {
     // A wrong-parent move IS an ignored move.
     let mut with_junk = state.clone();
     assert!(with_junk.insert_verified(
-        &Record::sign(&w, &params, Body::Move { ply: 3, parent: [9u8; 32], uci: "g1f3".into() }),
+        &Record::sign(
+            &w,
+            &params,
+            Body::Move {
+                ply: 3,
+                parent: [9u8; 32],
+                uci: "g1f3".into()
+            }
+        ),
         &params
     ));
     assert_eq!(project(&with_junk, &params).ignored, 1);

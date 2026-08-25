@@ -498,8 +498,14 @@ fn resign_and_draw_bodies_sign_without_touching_the_ply_counter() {
     let record = sign(&white_record(), &mv(1, "e2e4"));
     for body in [
         Body::Resign,
-        Body::DrawOffer { ply: 1, at: [1u8; 32] },
-        Body::DrawAccept { ply: 2, offer: [2u8; 32] },
+        Body::DrawOffer {
+            ply: 1,
+            at: [1u8; 32],
+        },
+        Body::DrawAccept {
+            ply: 2,
+            offer: [2u8; 32],
+        },
     ] {
         let after = sign(&record, &body);
         assert_eq!(after.last_signed_ply, record.last_signed_ply);
@@ -533,7 +539,10 @@ fn a_move_past_max_ply_is_refused() {
         decide_sign(&record, &mv(past, "e2e4"), Some(ORIGIN)),
         SignDecision::Refuse(_)
     ));
-    assert_eq!(record.last_signed_ply, 0, "a refusal never advances the ply");
+    assert_eq!(
+        record.last_signed_ply, 0,
+        "a refusal never advances the ply"
+    );
 }
 
 #[test]
@@ -633,9 +642,18 @@ fn a_game_summary_with_params_and_contract_round_trips_through_cbor() {
 fn the_new_and_changed_bodies_round_trip_through_cbor() {
     let (w, _b, params) = game();
     for body in [
-        Body::DrawOffer { ply: 7, at: [3u8; 32] },
-        Body::DrawAccept { ply: 8, offer: [4u8; 32] },
-        Body::DrawClaim { ply: 9, at: [5u8; 32] },
+        Body::DrawOffer {
+            ply: 7,
+            at: [3u8; 32],
+        },
+        Body::DrawAccept {
+            ply: 8,
+            offer: [4u8; 32],
+        },
+        Body::DrawClaim {
+            ply: 9,
+            at: [5u8; 32],
+        },
     ] {
         let rec = adjourn_core::Record::sign(&w, &params, body.clone());
         let mut buf = Vec::new();
@@ -643,6 +661,9 @@ fn the_new_and_changed_bodies_round_trip_through_cbor() {
         let back: adjourn_core::Record = ciborium::from_reader(&buf[..]).expect("decode");
         assert_eq!(rec, back);
         assert_eq!(back.body, body);
-        assert!(back.verify(&params), "round-tripped record must still verify");
+        assert!(
+            back.verify(&params),
+            "round-tripped record must still verify"
+        );
     }
 }

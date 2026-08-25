@@ -38,7 +38,15 @@ fn spam_moves(key: &SigningKey, params: &GameParams, ply: u16, n: usize) -> Vec<
         .map(|i| {
             let mut parent = [0u8; 32];
             parent[..8].copy_from_slice(&(i as u64).to_le_bytes());
-            Record::sign(key, params, Body::Move { ply, parent, uci: "e2e4".into() })
+            Record::sign(
+                key,
+                params,
+                Body::Move {
+                    ply,
+                    parent,
+                    uci: "e2e4".into(),
+                },
+            )
         })
         .collect()
 }
@@ -431,8 +439,22 @@ fn resignation_and_draw_agreement() {
     let (state, params, w, b) = play(&["e2e4", "e7e5"]);
     let status = project(&state, &params);
     let head = status.chain.last().copied().unwrap();
-    let offer = Record::sign(&w, &params, Body::DrawOffer { ply: status.ply, at: head });
-    let accept = Record::sign(&b, &params, Body::DrawAccept { ply: status.ply, offer: offer.id() });
+    let offer = Record::sign(
+        &w,
+        &params,
+        Body::DrawOffer {
+            ply: status.ply,
+            at: head,
+        },
+    );
+    let accept = Record::sign(
+        &b,
+        &params,
+        Body::DrawAccept {
+            ply: status.ply,
+            offer: offer.id(),
+        },
+    );
     let mut drawn = state.clone();
     drawn.insert_verified(&offer, &params);
     drawn.insert_verified(&accept, &params);
@@ -446,8 +468,22 @@ fn resignation_and_draw_agreement() {
 
     // Self-accepting your own offer does nothing.
     let mut sneaky = state.clone();
-    let offer2 = Record::sign(&w, &params, Body::DrawOffer { ply: status.ply, at: head });
-    let self_accept = Record::sign(&w, &params, Body::DrawAccept { ply: status.ply, offer: offer2.id() });
+    let offer2 = Record::sign(
+        &w,
+        &params,
+        Body::DrawOffer {
+            ply: status.ply,
+            at: head,
+        },
+    );
+    let self_accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: status.ply,
+            offer: offer2.id(),
+        },
+    );
     sneaky.insert_verified(&offer2, &params);
     sneaky.insert_verified(&self_accept, &params);
     assert_eq!(project(&sneaky, &params).decision, None);

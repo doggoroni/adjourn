@@ -21,6 +21,25 @@ small independent fixes:
 
 ## What this costs
 
+> **AMENDED DURING IMPLEMENTATION — the analysis in this section was
+> superseded. It is kept as the record of what was designed and approved at the
+> time; do not read it as the shipped behaviour.**
+>
+> Two things below turned out to be false. The forfeit's evasion does not stop
+> at a stalled chain: an attacker who leaves exactly one *valid* candidate
+> standing rather than zero — a wrong-parent junk record plus a different legal
+> move, both lower-id than the real one — makes `walk` continue on the
+> substituted move instead of stalling. That is retroactive move substitution,
+> an unlimited takeback using the opponent as a search oracle. The same rewind
+> of the head revives expired `DrawOffer` and `DrawClaim` records. So "no win
+> is ever stolen" was wrong.
+>
+> The human partner ruled for a **structural, position-free double-sign
+> forfeit**: a signer holding two or more `Move` records at one ply forfeits,
+> counted without consulting legality. This restores the fraud proof in a
+> stronger form and makes K=2 load-bearing. Invariant 8 was reopened as the
+> accepted price. See `CLAUDE.md` invariant 11 for the rule as shipped.
+
 One guarantee gets weaker, deliberately, and this is the single most important
 line in the document.
 

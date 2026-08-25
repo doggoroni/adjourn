@@ -448,7 +448,10 @@ pub fn project(state: &GameState, params: &GameParams) -> Status {
                     repetitions,
                     pos.halfmoves(),
                 )
-                .map(|reason| Decision { winner: None, reason })
+                .map(|reason| Decision {
+                    winner: None,
+                    reason,
+                })
                 .or_else(|| {
                     if draw_agreed(state, params, head) {
                         Some(Decision {

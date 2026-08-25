@@ -349,7 +349,11 @@ fn an_over_k_state_comes_back_normalized_through_update() {
         spam.absorb_for_test(&Record::sign(
             &w,
             &params,
-            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+            Body::Move {
+                ply: 1,
+                parent,
+                uci: "e2e4".into(),
+            },
         ));
     }
     assert_eq!(spam.len(), 30, "the crafted state really is over-K");
@@ -361,7 +365,11 @@ fn an_over_k_state_comes_back_normalized_through_update() {
     )
     .expect("update_state");
 
-    assert_eq!(out.len(), 2, "the contract normalizes an over-K state to K=2");
+    assert_eq!(
+        out.len(),
+        2,
+        "the contract normalizes an over-K state to K=2"
+    );
 }
 
 /// I3: the BASE state of `update_state` must be normalized too, not just the
@@ -379,7 +387,11 @@ fn an_over_k_base_state_is_normalized_before_the_update_is_applied() {
         spam.absorb_for_test(&Record::sign(
             &w,
             &params,
-            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+            Body::Move {
+                ply: 1,
+                parent,
+                uci: "e2e4".into(),
+            },
         ));
     }
     assert_eq!(spam.len(), 30, "the crafted base state really is over-K");
@@ -422,7 +434,11 @@ fn an_over_k_state_summarizes_and_diffs_as_normalized() {
         spam.absorb_for_test(&Record::sign(
             &w,
             &params,
-            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+            Body::Move {
+                ply: 1,
+                parent,
+                uci: "e2e4".into(),
+            },
         ));
     }
     assert_eq!(spam.len(), 30, "the crafted state really is over-K");
@@ -430,13 +446,21 @@ fn an_over_k_state_summarizes_and_diffs_as_normalized() {
     // The summary must be bounded to K=2, not 30.
     let summary_bytes = summarize(&params, &spam);
     let decoded: Summary = from_reader(summary_bytes.as_ref()).expect("decode summary");
-    assert_eq!(decoded.len(), 2, "summarize_state must normalize before summarizing");
+    assert_eq!(
+        decoded.len(),
+        2,
+        "summarize_state must normalize before summarizing"
+    );
 
     // A peer holding nothing asks with an empty summary; the delta offered
     // back must be exactly the normalized K=2, not all 30.
     let delta_bytes = state_delta(&params, &spam, StateSummary::from(Vec::new()));
     let delta: Delta = from_reader(delta_bytes.as_ref()).expect("decode delta");
-    assert_eq!(delta.len(), 2, "get_state_delta must normalize before diffing");
+    assert_eq!(
+        delta.len(),
+        2,
+        "get_state_delta must normalize before diffing"
+    );
 
     // And once the peer holds the normalized K=2, a second round offers
     // nothing further -- it must not keep re-offering the evicted 28.

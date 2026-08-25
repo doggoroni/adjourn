@@ -434,7 +434,10 @@ pub async fn draw_offer<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawOffer { ply: g.status.ply, at },
+        Body::DrawOffer {
+            ply: g.status.ply,
+            at,
+        },
     )
     .await
 }
@@ -476,7 +479,10 @@ pub async fn draw_accept<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawAccept { ply: g.status.ply, offer },
+        Body::DrawAccept {
+            ply: g.status.ply,
+            offer,
+        },
     )
     .await
 }
@@ -519,7 +525,10 @@ pub async fn draw_claim<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawClaim { ply: g.status.ply, at },
+        Body::DrawClaim {
+            ply: g.status.ply,
+            at,
+        },
     )
     .await
 }

@@ -6,7 +6,7 @@
 //! at all. Ordering comes from the parent-hash chain, resolved at projection
 //! time (see `project.rs`).
 
-use crate::types::{GameParams, Kind, KeyBytes, Record, RecordId};
+use crate::types::{GameParams, KeyBytes, Kind, Record, RecordId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
