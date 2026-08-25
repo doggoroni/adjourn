@@ -24,6 +24,24 @@ pub trait NodeClient {
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()>;
     async fn update(&mut self, key: ContractKey, delta: Vec<u8>) -> anyhow::Result<()>;
     async fn delegate(&mut self, req: Request) -> anyhow::Result<Response>;
+
+    /// The next update notification for a contract this client subscribed to,
+    /// or `None` if there is nothing waiting.
+    ///
+    /// Deliberately NOT bounded by a request timeout. A correspondence move can
+    /// legitimately take days, so a timeout here would report a healthy idle
+    /// game as a failure — the opposite of what the per-request timeout on the
+    /// other methods is for.
+    ///
+    /// The payload is `UpdateData`, which may be a `State`, a `Delta`, or a
+    /// `StateAndDelta` — the notification does not promise which. Callers hold
+    /// a `GameState` and MERGE whatever arrives rather than replacing, which is
+    /// what makes arrival order irrelevant and lets a browser converge exactly
+    /// as a peer does. `UpdateData` is `#[non_exhaustive]`: ignore variants you
+    /// do not recognise rather than panicking on them.
+    async fn next_update(
+        &mut self,
+    ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>>;
 }
 
 /// Build the contract container and its instance id from raw cargo WASM.

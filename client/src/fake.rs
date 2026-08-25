@@ -35,10 +35,20 @@ use crate::node::NodeClient;
 ///
 /// Shared across fakes so they converge on the same public state, exactly
 /// like two real nodes replicating the same contract.
-pub type World = Arc<Mutex<BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>>>;
+///
+/// The shared contract world: current state per contract, plus an ordered log
+/// of every write so a second fake can observe the first's writes the way a
+/// subscribed peer would.
+#[derive(Default)]
+pub struct WorldInner {
+    pub contracts: BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>,
+    pub log: Vec<([u8; 32], Vec<u8>)>,
+}
+
+pub type World = Arc<Mutex<WorldInner>>;
 
 pub fn shared_world() -> World {
-    Arc::new(Mutex::new(BTreeMap::new()))
+    Arc::new(Mutex::new(WorldInner::default()))
 }
 
 /// A `MemoryStore` for delegate secrets, paired with a handle to the shared
@@ -69,6 +79,7 @@ impl SecretStore for WorldBackedStore {
         self.world
             .lock()
             .ok()?
+            .contracts
             .get(id)
             .map(|(_, state)| state.clone())
     }
@@ -79,6 +90,7 @@ impl SecretStore for WorldBackedStore {
 pub struct FakeNode {
     world: World,
     store: WorldBackedStore,
+    cursor: usize,
 }
 
 impl FakeNode {
@@ -89,6 +101,7 @@ impl FakeNode {
                 world: world.clone(),
             },
             world,
+            cursor: 0,
         }
     }
 
@@ -100,6 +113,7 @@ impl FakeNode {
         self.world
             .lock()
             .expect("world lock poisoned")
+            .contracts
             .insert(*id, (Parameters::from(Vec::<u8>::new()), state));
     }
 }
@@ -114,16 +128,18 @@ impl NodeClient for FakeNode {
             .world
             .lock()
             .expect("world lock poisoned")
+            .contracts
             .get(&*id)
             .map(|(_, state)| state.clone()))
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {
         let id = *container.id();
-        self.world
-            .lock()
-            .expect("world lock poisoned")
-            .insert(*id, (container.params(), state));
+        let mut world = self.world.lock().expect("world lock poisoned");
+        world
+            .contracts
+            .insert(*id, (container.params(), state.clone()));
+        world.log.push((*id, state));
         Ok(())
     }
 
@@ -133,6 +149,7 @@ impl NodeClient for FakeNode {
             .world
             .lock()
             .expect("world lock poisoned")
+            .contracts
             .get(&*id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("fake node has no state for contract {id}"))?;
@@ -145,14 +162,32 @@ impl NodeClient for FakeNode {
         .map_err(|e| anyhow::anyhow!("update_state: {e:?}"))?;
         let new_state = modification.unwrap_valid();
 
-        self.world
-            .lock()
-            .expect("world lock poisoned")
+        let mut world = self.world.lock().expect("world lock poisoned");
+        world
+            .contracts
             .insert(*id, (params, new_state.as_ref().to_vec()));
+        world.log.push((*id, new_state.as_ref().to_vec()));
         Ok(())
     }
 
     async fn delegate(&mut self, req: Request) -> anyhow::Result<Response> {
         Ok(adjourn_delegate::handle(&mut self.store, None, req))
+    }
+
+    async fn next_update(
+        &mut self,
+    ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
+        let entry = {
+            let world = self.world.lock().expect("world lock");
+            world.log.get(self.cursor).cloned()
+        };
+        let Some((id, bytes)) = entry else {
+            return Ok(None);
+        };
+        self.cursor += 1;
+        Ok(Some((
+            ContractInstanceId::new(id),
+            UpdateData::State(State::from(bytes)),
+        )))
     }
 }

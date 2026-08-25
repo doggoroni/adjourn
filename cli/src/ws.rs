@@ -163,4 +163,21 @@ impl NodeClient for WsClient {
             }
         }
     }
+
+    async fn next_update(
+        &mut self,
+    ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
+        loop {
+            match self.api.recv().await? {
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => return Ok(Some((*key.id(), update))),
+                // Anything else on this socket is a response to a request we
+                // are no longer waiting on. Skip rather than fail: dropping the
+                // connection over a late reply would end a healthy session.
+                _ => continue,
+            }
+        }
+    }
 }
