@@ -478,10 +478,21 @@ either yields an update or does not return — it can never produce `None`.
 
 `watch` has no automated test against a real node.
 `client/tests/updates.rs::watch_label_reports_the_opponents_move` drives
-`watch_label` itself against two `FakeNode`s — subscribe, opponent moves,
-callback fires with `ply == 1` — so the id filter, the merge arms and the
-termination check all execute. The CLI's argument parsing and rendering for
-`adjourn watch` is not exercised by any test, automated or otherwise.
+`watch_label` end to end against two `FakeNode`s — subscribe, opponent moves,
+callback fires with `ply == 1`. Be precise about what that pins down, because
+the previous version of this paragraph was not. It pins: that `watch_label`
+runs end to end at all; that it decodes a `Delta` payload (reverting
+`FakeNode` to emit `State` fails it); and that it terminates on `Ok(None)`.
+
+It does **not** cover the subscribing-GET merge, and mutation testing confirms
+that — the test still passes with the merge deleted, with `watch_label`'s own
+`node.get(.., true)` deleted, or with the `*id != g.contract` filter deleted.
+The reason is structural, not an oversight in the test: both fakes share one
+`World`, so `open_game`'s GET already returns the post-move state and there is
+no lost-update window for the fake to simulate. Closing that gap means teaching
+`FakeNode` to model per-node state divergence, which is a larger change than
+the feature it would be testing. The CLI's argument parsing and rendering for
+`adjourn watch` is likewise not exercised by any test.
 
 `FakeNode` broadcasts the **delta** for an update and whole **state** for a
 PUT (`Broadcast` in `client/src/fake.rs`), matching what a real node sends
@@ -491,6 +502,18 @@ left the live arm untested. All three arms now *report* a decode failure
 instead of swallowing it (`decode_state_payload` / `decode_delta_payload` in
 `session.rs`) — a dropped decode error is a board that silently never updates,
 which is the same failure signature this section has already described twice.
+
+**An empty payload is not a decode failure**, and both helpers return
+`Ok(None)` for one rather than erroring. This is the same rule as "empty state
+is valid, not malformed" above, and it is load-bearing in both directions: a
+contract is PUT with `Vec::new()` before either player moves and that PUT is
+broadcast verbatim, while `get_state_delta` deliberately emits ZERO bytes for
+an empty delta so freenet-core's "empty delta -> skip broadcast" path can fire
+(the `self_delta_empty` fix). `GameState::decode` returns `None` on zero bytes,
+so erroring on a decode failure without splitting the empty case out first
+exits `adjourn watch` non-zero mid-game over a perfectly legal broadcast. The
+subscribing GET runs through the same two helpers so the rule cannot drift
+between the two paths.
 
 `adjourn-client` takes randomness as a **parameter** (`invite_new`'s `entropy`
 and `nonce`, `invite_accept`'s `entropy`) rather than generating it. The crate

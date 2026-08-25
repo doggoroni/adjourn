@@ -358,24 +358,46 @@ pub async fn show_label<N: NodeClient>(
     Ok(g.status)
 }
 
-/// Decode an update notification's `State` half, or say so.
+/// Decode an update notification's `State` half. `Ok(None)` means the payload
+/// was empty and there is nothing to merge.
 ///
-/// Both this and [`decode_delta_payload`] REPORT failure rather than
-/// swallowing it. A dropped decode error leaves a board that silently never
-/// updates with no error anywhere -- exactly the symptom of decoding a
-/// `Delta` as a `GameState` or vice versa, which is why the two are separate
-/// functions over separate payload halves.
-fn decode_state_payload(bytes: &[u8]) -> anyhow::Result<GameState> {
-    GameState::decode(bytes).ok_or_else(|| {
+/// Both this and [`decode_delta_payload`] REPORT a genuine decode failure
+/// rather than swallowing it. A dropped decode error leaves a board that
+/// silently never updates with no error anywhere -- exactly the symptom of
+/// decoding a `Delta` as a `GameState` or vice versa, which is why the two
+/// are separate functions over separate payload halves.
+///
+/// But an EMPTY payload is not a failure, and erroring on one would exit
+/// `adjourn watch` non-zero mid-game over a perfectly legal broadcast. Empty
+/// state means "I have nothing", not "I am malformed" -- a contract is PUT
+/// with `Vec::new()` before either player moves, and that PUT is broadcast to
+/// subscribers verbatim. `GameState::decode` returns `None` on zero bytes, so
+/// the empty case has to be split out here rather than left to it.
+fn decode_state_payload(bytes: &[u8]) -> anyhow::Result<Option<GameState>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    GameState::decode(bytes).map(Some).ok_or_else(|| {
         anyhow::anyhow!("an update notification's State payload did not decode as a GameState")
     })
 }
 
-/// Decode an update notification's `Delta` half, or say so. A `Delta` is
-/// `Vec<Record>` -- a DIFFERENT type with a different encoding from
-/// `GameState`, not an interchangeable one.
-fn decode_delta_payload(bytes: &[u8]) -> anyhow::Result<Delta> {
+/// Decode an update notification's `Delta` half. A `Delta` is `Vec<Record>` --
+/// a DIFFERENT type with a different encoding from `GameState`, not an
+/// interchangeable one.
+///
+/// `Ok(None)` on empty bytes, for the same reason as [`decode_state_payload`]
+/// and one more specific to deltas: `get_state_delta` deliberately emits ZERO
+/// bytes for an empty delta rather than an encoded empty list, so that
+/// freenet-core's "empty delta -> skip broadcast" path can fire at all. That
+/// is the `self_delta_empty` fix this repo already made, and treating those
+/// zero bytes as corruption here would undo its point at the receiving end.
+fn decode_delta_payload(bytes: &[u8]) -> anyhow::Result<Option<Delta>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
     ciborium::from_reader::<Delta, &[u8]>(bytes)
+        .map(Some)
         .map_err(|e| anyhow::anyhow!("an update notification's Delta payload did not decode: {e}"))
 }
 
@@ -414,9 +436,13 @@ pub async fn watch_label<N: NodeClient>(
     // view available and closes that window on any transport, whatever the
     // transport's own subscribe-ordering guarantees are.
     let subscribed = node.get(ContractInstanceId::new(g.contract), true).await?;
-    if let Some(bytes) = subscribed.filter(|b| !b.is_empty()) {
-        let fresh = GameState::decode(&bytes)
-            .ok_or_else(|| anyhow::anyhow!("contract state did not decode as a GameState"))?;
+    // Same empty-is-not-malformed rule as the notification arms below, and
+    // through the same helper so the two can never drift apart.
+    let fresh = match subscribed.as_deref() {
+        Some(bytes) => decode_state_payload(bytes)?,
+        None => None,
+    };
+    if let Some(fresh) = fresh {
         let before = state.records.len();
         state.merge(&fresh, &g.params);
         // Report only if that actually moved us on, so the common case (the
@@ -454,16 +480,26 @@ pub async fn watch_label<N: NodeClient>(
         // leaves a board that silently never updates with no error anywhere --
         // exactly the symptom that would follow from decoding a `Delta` as a
         // `GameState` or vice versa, and the reason the arms are kept apart.
+        // An EMPTY payload is not a decode failure and must not be treated as
+        // one -- see `decode_state_payload` and `decode_delta_payload`.
         match update {
             UpdateData::State(bytes) => {
-                state.merge(&decode_state_payload(bytes.as_ref())?, &g.params);
+                if let Some(incoming) = decode_state_payload(bytes.as_ref())? {
+                    state.merge(&incoming, &g.params);
+                }
             }
             UpdateData::Delta(bytes) => {
-                state.apply_delta(&decode_delta_payload(bytes.as_ref())?, &g.params);
+                if let Some(delta) = decode_delta_payload(bytes.as_ref())? {
+                    state.apply_delta(&delta, &g.params);
+                }
             }
             UpdateData::StateAndDelta { state: s, delta } => {
-                state.merge(&decode_state_payload(s.as_ref())?, &g.params);
-                state.apply_delta(&decode_delta_payload(delta.as_ref())?, &g.params);
+                if let Some(incoming) = decode_state_payload(s.as_ref())? {
+                    state.merge(&incoming, &g.params);
+                }
+                if let Some(delta) = decode_delta_payload(delta.as_ref())? {
+                    state.apply_delta(&delta, &g.params);
+                }
             }
             // `UpdateData` is `#[non_exhaustive]`. Ignore what we do not know.
             _ => continue,
