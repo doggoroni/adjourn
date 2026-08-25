@@ -15,7 +15,7 @@ use adjourn_contract::Contract;
 use adjourn_core::delegate_api::{Request, Response};
 use adjourn_delegate::secrets::{MemoryStore, SecretStore};
 use freenet_stdlib::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use crate::node::NodeClient;
@@ -91,6 +91,11 @@ pub struct FakeNode {
     world: World,
     store: WorldBackedStore,
     cursor: usize,
+    /// Contracts this node has asked to be subscribed to via `get(.., true)`.
+    /// `next_update` only surfaces log entries for ids in this set -- modeling
+    /// the real node's requirement that watching needs an explicit subscribe,
+    /// not just any prior read.
+    subscribed: BTreeSet<[u8; 32]>,
 }
 
 impl FakeNode {
@@ -102,6 +107,7 @@ impl FakeNode {
             },
             world,
             cursor: 0,
+            subscribed: BTreeSet::new(),
         }
     }
 
@@ -122,8 +128,11 @@ impl NodeClient for FakeNode {
     async fn get(
         &mut self,
         id: ContractInstanceId,
-        _subscribe: bool,
+        subscribe: bool,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        if subscribe {
+            self.subscribed.insert(*id);
+        }
         Ok(self
             .world
             .lock()
@@ -177,17 +186,24 @@ impl NodeClient for FakeNode {
     async fn next_update(
         &mut self,
     ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
-        let entry = {
-            let world = self.world.lock().expect("world lock");
-            world.log.get(self.cursor).cloned()
-        };
-        let Some((id, bytes)) = entry else {
-            return Ok(None);
-        };
-        self.cursor += 1;
-        Ok(Some((
-            ContractInstanceId::new(id),
-            UpdateData::State(State::from(bytes)),
-        )))
+        loop {
+            let entry = {
+                let world = self.world.lock().expect("world lock");
+                world.log.get(self.cursor).cloned()
+            };
+            let Some((id, bytes)) = entry else {
+                return Ok(None);
+            };
+            self.cursor += 1;
+            if !self.subscribed.contains(&id) {
+                // Not subscribed to this contract: skip it, but the cursor
+                // has already advanced past it so it never stalls the log.
+                continue;
+            }
+            return Ok(Some((
+                ContractInstanceId::new(id),
+                UpdateData::State(State::from(bytes)),
+            )));
+        }
     }
 }

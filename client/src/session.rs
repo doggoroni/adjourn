@@ -361,6 +361,11 @@ pub async fn watch_label<N: NodeClient>(
     let mut state = g.state;
     on_status(&project(&state, &g.params));
 
+    // `open_game`'s GET deliberately does not subscribe -- the one-shot
+    // commands share it and must not leave subscriptions behind. Watching is
+    // the one flow that needs one, so it asks for its own.
+    node.get(ContractInstanceId::new(g.contract), true).await?;
+
     loop {
         let Some((id, update)) = node.next_update().await? else {
             continue;

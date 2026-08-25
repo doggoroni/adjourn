@@ -5,7 +5,7 @@ use adjourn_client::node::NodeClient;
 use adjourn_client::session::{game_bind, invite_accept, invite_new, play_move, show_label};
 use adjourn_core::delegate_api::Side;
 use adjourn_core::GameState;
-use freenet_stdlib::prelude::UpdateData;
+use freenet_stdlib::prelude::{ContractInstanceId, UpdateData};
 
 /// Alice moves; Bob learns about it from a notification rather than a GET.
 #[tokio::test]
@@ -23,9 +23,14 @@ async fn a_move_reaches_the_other_peer_as_an_update() {
         .await
         .unwrap();
 
-    // Bob reads the game once, so he is subscribed and holds a baseline.
     let before = show_label(&mut bob, "bob", wasm.clone()).await.unwrap();
     assert_eq!(before.ply, 0);
+
+    // Subscribing is what makes updates arrive at all; `show_label` does not.
+    let contract = contract_bytes_of(&mut bob, "bob").await;
+    bob.get(ContractInstanceId::new(contract), true)
+        .await
+        .unwrap();
 
     // The setup PUTs the contract, so the log is not empty. Drain it, so what
     // follows observes only what the test itself causes.
