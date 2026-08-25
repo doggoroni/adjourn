@@ -333,30 +333,52 @@ In `client/src/node.rs`, add to `trait NodeClient`:
 
 - [ ] **Step 4: Implement it on `FakeNode`**
 
-In `client/src/fake.rs`, extend `World` with a broadcast log and give each
-`FakeNode` a cursor into it. Add to the struct that `World` wraps:
+In `client/src/fake.rs`. **`World` is currently a bare type alias over a
+`BTreeMap`** — `Arc<Mutex<BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>>>` —
+so there is no struct to add a field to. Give it one:
 
 ```rust
-/// Every contract write, in order, so a second fake can observe the first's
-/// writes the way a subscribed peer would.
-pub log: Vec<(ContractInstanceId, Vec<u8>)>,
+/// The shared contract world: current state per contract, plus an ordered log
+/// of every write so a second fake can observe the first's writes the way a
+/// subscribed peer would.
+#[derive(Default)]
+pub struct WorldInner {
+    pub contracts: BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>,
+    pub log: Vec<([u8; 32], Vec<u8>)>,
+}
+
+pub type World = Arc<Mutex<WorldInner>>;
+
+pub fn shared_world() -> World {
+    Arc::new(Mutex::new(WorldInner::default()))
+}
 ```
 
-`FakeNode` gains `cursor: usize`. In `FakeNode`'s `update` and `put`
-implementations, append `(id, state_bytes)` to `world.log` after the write
-succeeds. Then:
+Every existing `world.lock()` call site in this file then indexes
+`.contracts` where it previously indexed the map directly. That is a mechanical
+change the compiler will walk you through — do not change any behaviour while
+making it.
+
+`FakeNode` gains `cursor: usize`, initialised to `0` in `FakeNode::new`. In
+`FakeNode`'s `update` and `put` implementations, push `(id, state_bytes)` onto
+`world.log` after the write succeeds. Then:
 
 ```rust
     async fn next_update(
         &mut self,
     ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
-        let world = self.world.lock().expect("world lock");
-        let Some((id, bytes)) = world.log.get(self.cursor).cloned() else {
+        let entry = {
+            let world = self.world.lock().expect("world lock");
+            world.log.get(self.cursor).cloned()
+        };
+        let Some((id, bytes)) = entry else {
             return Ok(None);
         };
-        drop(world);
         self.cursor += 1;
-        Ok(Some((id, UpdateData::State(State::from(bytes)))))
+        Ok(Some((
+            ContractInstanceId::from(id),
+            UpdateData::State(State::from(bytes)),
+        )))
     }
 ```
 
@@ -480,7 +502,14 @@ pub async fn watch_label<N: NodeClient>(
 }
 ```
 
-Add `use freenet_stdlib::prelude::UpdateData;` to the file's imports.
+Add both of these to the file's imports — `Delta` is `Vec<Record>`, a
+different type from `GameState` with a different encoding, and the file
+does not import it today:
+
+```rust
+use adjourn_core::state::Delta;
+use freenet_stdlib::prelude::UpdateData;
+```
 
 - [ ] **Step 2: Replace the `watch` stub**
 
