@@ -434,7 +434,10 @@ pub async fn draw_offer<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawOffer { at },
+        Body::DrawOffer {
+            ply: g.status.ply,
+            at,
+        },
     )
     .await
 }
@@ -464,7 +467,7 @@ pub async fn draw_accept<N: NodeClient>(
         .records
         .iter()
         .find(|(_, rec)| {
-            matches!(&rec.body, Body::DrawOffer { at } if *at == head)
+            matches!(&rec.body, Body::DrawOffer { at, .. } if *at == head)
                 && rec.color(&g.params) == Some(!our_color)
         })
         .map(|(id, _)| *id)
@@ -476,7 +479,56 @@ pub async fn draw_accept<N: NodeClient>(
         g.container,
         &g.params,
         g.contract,
-        Body::DrawAccept { offer },
+        Body::DrawAccept {
+            ply: g.status.ply,
+            offer,
+        },
+    )
+    .await
+}
+
+/// Claim a draw by threefold repetition or the fifty-move rule.
+///
+/// Both are FIDE *claims* (9.2, 9.3), not automatic results, so nothing happens
+/// until a player asks. Checked locally first: a claim with no ground is ignored
+/// at projection anyway, so signing one would just add a dead record to state.
+pub async fn draw_claim<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<Status> {
+    let g = open_game(node, label, contract_wasm).await?;
+    if g.status.is_over() {
+        bail!("the game is already over");
+    }
+    let our_color: Color = g.side.into();
+    if g.status.turn != our_color {
+        bail!("only the player to move may claim a draw");
+    }
+    if g.status.repetitions < 3 && g.status.halfmove_clock < 100 {
+        bail!(
+            "no draw to claim: {} repetitions, {} halfmoves since a capture or pawn move",
+            g.status.repetitions,
+            g.status.halfmove_clock
+        );
+    }
+    let at = g
+        .status
+        .chain
+        .last()
+        .copied()
+        .unwrap_or_else(|| g.params.genesis());
+
+    sign_and_submit(
+        node,
+        g.game_id,
+        g.container,
+        &g.params,
+        g.contract,
+        Body::DrawClaim {
+            ply: g.status.ply,
+            at,
+        },
     )
     .await
 }

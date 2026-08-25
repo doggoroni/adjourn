@@ -31,7 +31,7 @@ concurrent writes are impossible rather than merely resolved.
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter |
 | `delegates/adjourn-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
 
-## Four decisions worth keeping
+## Five decisions worth keeping
 
 1. **Record ids exclude the signature.** Content address is `H(signer ‖ body)`,
    so two encodings of the same statement collapse to one entry. Collisions
@@ -48,21 +48,42 @@ concurrent writes are impossible rather than merely resolved.
    made the whole state invalid, either player could destroy the game by
    signing garbage.
 
-3. **Double-signing is self-incriminating.** Two distinct legal moves at the
-   same ply from the same player is a fraud proof sitting in the state.
-   The projection forfeits deterministically — no arbiter needed.
+3. **Double-signing is self-incriminating, and the proof is structural.** Two
+   or more `Move` records from one signer at one ply is a fraud proof sitting
+   in the state, and the projection forfeits deterministically — no arbiter
+   needed. The rule *counts records*; it never asks whether any of them is a
+   legal move. That matters because eviction (below) has to sort blind by id,
+   so a legality-based proof could be dissolved by burying it under lower-id
+   junk — which is exactly how a player would otherwise rewrite a ply their
+   opponent had already answered. Counting cannot be dissolved: the burial
+   records are themselves two records in one group. One illegal move alone is
+   still merely ignored; only two or more at one ply are fatal.
 
-4. **Every signature is bound to `game_id`.** Prevents replaying a move from
+4. **State is bounded by top-K eviction.** Merge keeps only the K smallest ids
+   per `(signer, kind, ply)` group — K=2 for moves, K=1 for draw records — with
+   `MAX_PLY = 4096` bounding the number of groups. Top-K distributes over
+   union, so the monoid survives. Per-*signer* grouping is what makes it safe
+   against an opponent: your records only ever compete with your own. K=2 is
+   load-bearing rather than decorative — it floors a move group rather than
+   emptying it, so an attacker cannot evict away their own fraud proof.
+
+5. **Every signature is bound to `game_id`.** Prevents replaying a move from
    one game into a rematch between the same two players.
 
 Fixed precedence, so all peers agree: forfeit > resignation > board result >
-draw agreement. Resignation outranks the board because `Resign` is unanchored —
-otherwise a player could resign, play on to a mate, and be awarded the win.
+draw claim > draw agreement. Resignation outranks the board because `Resign` is
+unanchored — otherwise a player could resign, play on to a mate, and be awarded
+the win. The board outranks a draw claim because the claimant is by definition
+the player to move, so a mated player must not be able to claim their way out.
+`DrawClaim` is how FIDE 9.2 (threefold) and 9.3 (fifty-move) are cashed: both
+are *claims*, not automatic results, and only the player to move may make one.
+The genuinely automatic rules (fivefold 9.6.1, seventy-five-move 9.6.2) still
+fire on their own.
 
 ## Verified
 
 ```
-cargo test --workspace --locked     # 76 tests (59 adjourn-core + 13 contract + 4 delegate adapter)
+cargo test --workspace --locked     # 138 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 13 CLI)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 
@@ -84,10 +105,18 @@ Build the contract **only** through that script: it applies the
 - `forged_signature_cannot_evict_the_valid_record` / `merge_and_filter_commute`
   — validation and merge commute, so peers that validate at different points in
   the pipeline agree
+- `retroactive_move_substitution_forfeits` /
+  `reviving_an_expired_draw_offer_by_rewinding_forfeits` — the two attacks the
+  structural forfeit exists to close: rewriting a ply the opponent has already
+  answered, and rewinding the head to cash an expired draw offer
+- `a_buried_double_sign_still_forfeits` — burying a fraud proof under lower-id
+  junk no longer evades it; the junk is the proof
+- `eviction_distributes_over_merge` / `eviction_bounds_a_spammed_group` —
+  top-K survives merge, and a spammed group stays bounded
 - plus: forgery, wrong-turn, cross-game replay, illegal-move poisoning,
   signature malleability, canonical encoding, outcome precedence, head-bound
-  draw offers, promotion and underpromotion, castling notation, en passant,
-  fivefold repetition
+  draw offers and claims, `MAX_PLY`, promotion and underpromotion, castling
+  notation, en passant, threefold and fivefold repetition
 
 Full-game state is ~1.1 KB / 7 records for a 7-ply game (~157 bytes per move),
 and a sync summary is exactly 64 bytes per record.
@@ -117,10 +146,15 @@ The wire format is **not frozen**. Two changes still pending will rotate every
 identifier in the system:
 
 - **The wire format is now frozen-ish but unversioned.** The encoding pass is
-  done (state 2494 -> 1100 bytes, summary ~110 -> 64 per record), and
-  `fdev conformance` reports 403/403 cases held. But there is no format version
-  field, so any future change is still a hard break rather than a negotiated
-  one.
+  done (state 2494 -> 1100 bytes, summary ~110 -> 64 per record). But there is
+  no format version field, so any future change is still a hard break rather
+  than a negotiated one — and `Body::DrawClaim` plus the `ply` field on the
+  draw bodies were exactly such a break, so the contract key has rotated again.
+- **`fdev conformance` has not been re-run since that break.** The last
+  recorded result predates it, against states that no longer decode as what
+  they were, and it exercised none of eviction, `MAX_PLY`, draw claims or the
+  structural forfeit. See `CLAUDE.md`, "Check against the network's own
+  verifier".
 
 Treat published contract keys as ephemeral until this section says otherwise.
 

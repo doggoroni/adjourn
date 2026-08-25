@@ -13,6 +13,54 @@ use shakmaty::Color;
 pub type RecordId = [u8; 32];
 pub type KeyBytes = [u8; 32];
 
+/// The largest ply any record may carry, checked structurally in
+/// [`Record::verify`].
+///
+/// This is what bounds the NUMBER of eviction groups, and therefore the state:
+/// 5 records per signer per ply (2 moves + 1 each of three draw kinds), 10 per
+/// ply across both players, so ~41,000 records or ~6.4 MB worst case.
+///
+/// 4096 plies is 2048 full moves. The longest recorded competitive game is 269
+/// moves, so this cannot bind on real play. It is deliberately NOT the
+/// theoretical maximum (~17,700 plies under the 75-move and fivefold automatic
+/// rules), which would put the bound near 28 MB.
+///
+/// It also closes `walk`'s unbounded `ply += 1`: no record beyond the cap can
+/// exist, so no chain can reach it.
+pub const MAX_PLY: u16 = 4096;
+
+/// Which kind of statement a body is, used as part of the eviction group key.
+///
+/// Separating kinds is load-bearing, not tidiness. Were groups keyed on
+/// `(signer, ply)` alone, a player could flood `DrawOffer` records at ply N to
+/// evict their own `Move` records at ply N -- including both halves of a
+/// double-sign fraud proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Move,
+    Resign,
+    DrawOffer,
+    DrawAccept,
+    DrawClaim,
+}
+
+impl Kind {
+    /// How many records one signer may hold in one `(signer, kind, ply)` group.
+    pub fn k(self) -> usize {
+        match self {
+            // Two, so the structural double-sign proof survives eviction.
+            // This is the load-bearing choice, not a decorative one: a group
+            // of two is FLOORED at two rather than emptied, so a cheater
+            // cannot spam their own group down to a single clean record and
+            // erase the evidence. See `project::double_signed`.
+            Kind::Move => 2,
+            // At a given ply there is exactly one head, so exactly one
+            // legitimate `at`. K=1 costs an honest player nothing.
+            _ => 1,
+        }
+    }
+}
+
 const DOMAIN_GAME: &[u8] = b"adjourn-v1/game";
 const DOMAIN_GENESIS: &[u8] = b"adjourn-v1/genesis";
 const DOMAIN_REC: &[u8] = b"adjourn-v1/rec";
@@ -98,17 +146,66 @@ pub enum Body {
     Resign,
     /// A draw offer anchored to a specific head, so it expires implicitly
     /// once the game moves on.
+    ///
+    /// `ply` is a grouping index for eviction ONLY. Projection ignores it and
+    /// keys liveness off `at`; checking the two against each other would make
+    /// a second source of truth for liveness, and a wrong-but-honest `ply`
+    /// would then silently void a legitimate draw.
     #[serde(rename = "o")]
     DrawOffer {
+        #[serde(rename = "p")]
+        ply: u16,
         #[serde(rename = "t", with = "serde_bytes")]
         at: RecordId,
     },
-    /// Accepts a specific offer by record id.
+    /// Accepts a specific offer by record id. `ply` is a grouping index only,
+    /// as for `DrawOffer`.
     #[serde(rename = "a")]
     DrawAccept {
+        #[serde(rename = "p")]
+        ply: u16,
         #[serde(rename = "o", with = "serde_bytes")]
         offer: RecordId,
     },
+    /// Claims a draw by threefold repetition (FIDE 9.2) or the fifty-move rule
+    /// (9.3), anchored to the head like `DrawOffer`.
+    ///
+    /// Carries no claim kind: projection already knows the repetition count and
+    /// halfmove clock at the head, so it checks whether EITHER ground holds and
+    /// reports which one fired.
+    #[serde(rename = "c")]
+    DrawClaim {
+        #[serde(rename = "p")]
+        ply: u16,
+        #[serde(rename = "t", with = "serde_bytes")]
+        at: RecordId,
+    },
+}
+
+impl Body {
+    /// The ply this body is indexed at, for eviction grouping.
+    ///
+    /// `Resign` has none, and needs none: it is a unit variant, so one signer
+    /// has exactly one possible `Resign` body and therefore one possible id.
+    pub fn ply(&self) -> Option<u16> {
+        match self {
+            Body::Move { ply, .. }
+            | Body::DrawOffer { ply, .. }
+            | Body::DrawAccept { ply, .. }
+            | Body::DrawClaim { ply, .. } => Some(*ply),
+            Body::Resign => None,
+        }
+    }
+
+    pub fn kind(&self) -> Kind {
+        match self {
+            Body::Move { .. } => Kind::Move,
+            Body::Resign => Kind::Resign,
+            Body::DrawOffer { .. } => Kind::DrawOffer,
+            Body::DrawAccept { .. } => Kind::DrawAccept,
+            Body::DrawClaim { .. } => Kind::DrawClaim,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +281,12 @@ impl Record {
     /// signing garbage.
     pub fn verify(&self, params: &GameParams) -> bool {
         if params.color_of(&self.signer).is_none() {
+            return false;
+        }
+        // Structural, and deliberately before any signature work: a pure
+        // per-record predicate, so it distributes over merge and cannot cause
+        // the partial-state divergence a chain-length-dependent rule would.
+        if self.body.ply().is_some_and(|p| p > MAX_PLY) {
             return false;
         }
         if self.sig.len() != 64 {

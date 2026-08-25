@@ -30,6 +30,36 @@ fn play(moves: &[&str]) -> (GameState, GameParams, SigningKey, SigningKey) {
     (state, params, w, b)
 }
 
+/// `n` structurally-valid records from one signer in one `(signer, kind, ply)`
+/// group. Varying `parent` gives distinct bodies -- hence distinct ids -- while
+/// `verify` stays true, since it does not check the parent link.
+fn spam_moves(key: &SigningKey, params: &GameParams, ply: u16, n: usize) -> Vec<Record> {
+    (0..n)
+        .map(|i| {
+            let mut parent = [0u8; 32];
+            parent[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            Record::sign(
+                key,
+                params,
+                Body::Move {
+                    ply,
+                    parent,
+                    uci: "e2e4".into(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// A state holding exactly these records, with NO eviction applied.
+fn raw(records: &[Record]) -> GameState {
+    let mut s = GameState::empty();
+    for r in records {
+        s.absorb_for_test(r);
+    }
+    s
+}
+
 /// A second, different, but fully VALID signature over the same body.
 ///
 /// ed25519 verification does not pin the nonce, so re-signing with a different
@@ -219,7 +249,7 @@ fn illegal_move_is_ignored_not_fatal() {
     let (state, params, w, b) = play(&["e2e4"]);
     let mut poisoned = state.clone();
 
-    // Black signs a structurally valid but chess-illegal move.
+    // Black signs ONE structurally valid but chess-illegal move.
     let junk = Record::sign(
         &b,
         &params,
@@ -231,23 +261,78 @@ fn illegal_move_is_ignored_not_fatal() {
     );
     assert!(poisoned.insert_verified(&junk, &params));
 
-    // State stays valid; the game simply hasn't advanced.
+    // State stays valid; the game simply hasn't advanced. Crucially it is NOT
+    // a forfeit: one record in a `(signer, Move, ply)` group is not a
+    // double-sign, however illegal it is. Invariant 1.
     assert!(poisoned.all_valid(&params));
-    assert_eq!(project(&poisoned, &params).ply, 1);
-
-    // Black can still play a real move afterwards, and it is NOT a forfeit
-    // because only one candidate is legal.
-    let real = make_move(&poisoned, &params, &b, "e7e5").unwrap();
-    poisoned.insert_verified(&real, &params);
     let st = project(&poisoned, &params);
-    assert_eq!(st.ply, 2);
-    assert_eq!(st.decision, None);
+    assert_eq!(st.ply, 1);
+    assert_eq!(st.decision, None, "one illegal move must never be fatal");
     assert_eq!(st.ignored, 1);
 
-    // White is unaffected and play continues.
-    let nxt = make_move(&poisoned, &params, &w, "g1f3").unwrap();
-    poisoned.insert_verified(&nxt, &params);
-    assert_eq!(project(&poisoned, &params).ply, 3);
+    // An inert record at a ply the chain never reaches is likewise ignored,
+    // and play continues straight past it.
+    let mut aside = state.clone();
+    let stray = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 8,
+            parent: [9u8; 32],
+            uci: "a1a8".into(),
+        },
+    );
+    assert!(aside.insert_verified(&stray, &params));
+
+    let real = make_move(&aside, &params, &b, "e7e5").unwrap();
+    aside.insert_verified(&real, &params);
+    let nxt = make_move(&aside, &params, &w, "g1f3").unwrap();
+    aside.insert_verified(&nxt, &params);
+
+    let st = project(&aside, &params);
+    assert_eq!(st.ply, 3);
+    assert_eq!(st.decision, None);
+    assert_eq!(st.ignored, 1);
+}
+
+/// The structural rule's edge, stated as its own test: a legal move and an
+/// ILLEGAL one at the same ply from the same signer is still two `Move`
+/// records in one group, and therefore still a forfeit. The rule counts
+/// records; it never looks at the position.
+#[test]
+fn a_legal_and_an_illegal_move_at_one_ply_forfeit() {
+    let (state, params, _w, b) = play(&["e2e4"]);
+    let head = project(&state, &params).chain[0];
+
+    let mut s = state.clone();
+    let junk = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 2,
+            parent: head,
+            uci: "a1a8".into(),
+        },
+    );
+    let real = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 2,
+            parent: head,
+            uci: "e7e5".into(),
+        },
+    );
+    assert!(s.insert_verified(&junk, &params));
+    assert!(s.insert_verified(&real, &params));
+
+    assert_eq!(
+        project(&s, &params).decision,
+        Some(Decision {
+            winner: Some(Color::White),
+            reason: Reason::DoubleSignForfeit
+        })
+    );
 }
 
 #[test]
@@ -352,9 +437,24 @@ fn resignation_and_draw_agreement() {
 
     // Draw: offer anchored at the head, accepted by the opponent.
     let (state, params, w, b) = play(&["e2e4", "e7e5"]);
-    let head = project(&state, &params).chain.last().copied().unwrap();
-    let offer = Record::sign(&w, &params, Body::DrawOffer { at: head });
-    let accept = Record::sign(&b, &params, Body::DrawAccept { offer: offer.id() });
+    let status = project(&state, &params);
+    let head = status.chain.last().copied().unwrap();
+    let offer = Record::sign(
+        &w,
+        &params,
+        Body::DrawOffer {
+            ply: status.ply,
+            at: head,
+        },
+    );
+    let accept = Record::sign(
+        &b,
+        &params,
+        Body::DrawAccept {
+            ply: status.ply,
+            offer: offer.id(),
+        },
+    );
     let mut drawn = state.clone();
     drawn.insert_verified(&offer, &params);
     drawn.insert_verified(&accept, &params);
@@ -368,8 +468,22 @@ fn resignation_and_draw_agreement() {
 
     // Self-accepting your own offer does nothing.
     let mut sneaky = state.clone();
-    let offer2 = Record::sign(&w, &params, Body::DrawOffer { at: head });
-    let self_accept = Record::sign(&w, &params, Body::DrawAccept { offer: offer2.id() });
+    let offer2 = Record::sign(
+        &w,
+        &params,
+        Body::DrawOffer {
+            ply: status.ply,
+            at: head,
+        },
+    );
+    let self_accept = Record::sign(
+        &w,
+        &params,
+        Body::DrawAccept {
+            ply: status.ply,
+            offer: offer2.id(),
+        },
+    );
     sneaky.insert_verified(&offer2, &params);
     sneaky.insert_verified(&self_accept, &params);
     assert_eq!(project(&sneaky, &params).decision, None);
@@ -423,6 +537,16 @@ fn signature_malleability_does_not_split_records() {
     loser.insert_verified(if a.sig < alt.sig { &alt } else { &a }, &params);
     assert_ne!(loser.summarize(), s1.summarize());
     assert_eq!(s1.delta_against(&loser.summarize()).len(), 1);
+
+    // And two VALID signatures over one body are ONE record in one slot, so
+    // the structural double-sign rule must not read them as a double-sign.
+    // Invariant 2 is what protects the forfeit from this false positive.
+    let st = project(&s1, &params);
+    assert_eq!(
+        st.decision, None,
+        "two signatures over one body are one record, not a double-sign"
+    );
+    assert_eq!(st.ply, 1, "and the move is played");
 
     // Sanity: the payload really is what we think it is.
     let payload = signing_payload(&params.game_id(), &body);
@@ -546,4 +670,133 @@ fn round_trips_through_cbor() {
         bytes.len(),
         full.len()
     );
+}
+
+#[test]
+fn eviction_bounds_a_spammed_group() {
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 50);
+    let mut state = GameState::empty();
+    state.merge(&raw(&spam), &params);
+    assert_eq!(state.len(), 2, "Move groups are capped at K=2");
+}
+
+#[test]
+fn eviction_distributes_over_merge() {
+    let (w, b, params) = keys();
+    let mut spam = spam_moves(&w, &params, 1, 25);
+    spam.extend(spam_moves(&b, &params, 2, 25));
+
+    // The law only bites when peers hold different fragments, so partition
+    // randomly and repeatedly rather than at one fixed point.
+    let mut rng = Rng(0x9E3779B97F4A7C15);
+    let mut whole = raw(&spam);
+    whole.evict();
+
+    for _ in 0..64 {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for rec in &spam {
+            if rng.below(2) == 0 {
+                left.push(rec.clone());
+            } else {
+                right.push(rec.clone());
+            }
+        }
+
+        // topK(topK(A) ∪ topK(B)) must equal topK(A ∪ B).
+        let mut split = GameState::empty();
+        split.merge(&raw(&left), &params);
+        split.merge(&raw(&right), &params);
+
+        assert_eq!(
+            split.records, whole.records,
+            "top-K must distribute over union for every partition"
+        );
+    }
+}
+
+#[test]
+fn eviction_is_idempotent() {
+    let (w, _b, params) = keys();
+    let mut state = GameState::empty();
+    state.merge(&raw(&spam_moves(&w, &params, 1, 30)), &params);
+    let once = state.clone();
+    state.evict();
+    assert_eq!(once.records, state.records);
+}
+
+#[test]
+fn merge_with_eviction_stays_commutative_and_associative() {
+    let (w, b, params) = keys();
+    let a = spam_moves(&w, &params, 1, 9);
+    let c = spam_moves(&b, &params, 2, 9);
+    let d = spam_moves(&w, &params, 3, 9);
+
+    // `merged` evicts, so these are already normalized -- no extra evict call.
+    let abc = raw(&a).merged(&raw(&c), &params).merged(&raw(&d), &params);
+    let cba = raw(&d).merged(&raw(&c), &params).merged(&raw(&a), &params);
+    assert_eq!(abc.records, cba.records, "order of merges must not matter");
+}
+
+#[test]
+fn a_spammer_cannot_evict_the_opponents_records() {
+    let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
+    let black_move = state
+        .records
+        .iter()
+        .find(|(_, r)| r.color(&params) == Some(Color::Black))
+        .map(|(id, _)| *id)
+        .expect("black moved");
+
+    // White floods every group they own at black's ply.
+    let mut flooded = state.clone();
+    flooded.merge(&raw(&spam_moves(&w, &params, 2, 60)), &params);
+
+    assert!(
+        flooded.records.contains_key(&black_move),
+        "grouping is per signer: only your own records compete with yours"
+    );
+}
+
+#[test]
+fn property_1_holds_after_eviction() {
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 20);
+
+    // A and B hold OVERLAPPING fragments of one (signer, kind, ply) group, so
+    // eviction actually fires when the delta is applied. The disjoint-groups
+    // version of this test (spamming w at ply 1 and b at ply 2) let each side
+    // land at K before the exchange, so the law held identically with or
+    // without eviction -- it never exercised the merge path.
+    let mut a = GameState::empty();
+    a.merge(&raw(&spam[..15]), &params);
+    let mut peer_b = GameState::empty();
+    peer_b.merge(&raw(&spam[5..]), &params);
+
+    let delta = a.delta_against(&peer_b.summarize());
+    let mut applied = peer_b.clone();
+    applied.apply_delta(&delta, &params);
+
+    // applyDelta(σ_B, δ) ⊔ σ_A == applyDelta(σ_B, δ)
+    let joined = applied.merged(&a, &params);
+    assert_eq!(applied.records, joined.records, "whitepaper Property 1");
+}
+
+#[test]
+fn two_peers_converge_when_one_holds_a_record_the_other_evicts() {
+    let (w, _b, params) = keys();
+    let spam = spam_moves(&w, &params, 1, 20);
+    let mut a = GameState::empty();
+    a.merge(&raw(&spam[..10]), &params);
+    let mut peer_b = GameState::empty();
+    peer_b.merge(&raw(&spam[10..]), &params);
+
+    // One bidirectional exchange.
+    let to_b = a.delta_against(&peer_b.summarize());
+    let to_a = peer_b.delta_against(&a.summarize());
+    peer_b.apply_delta(&to_b, &params);
+    a.apply_delta(&to_a, &params);
+
+    assert_eq!(a.records, peer_b.records, "converged after one round trip");
 }

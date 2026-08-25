@@ -109,6 +109,8 @@ fn render_reason(reason: Reason) -> &'static str {
         Reason::DrawAgreement => "draw agreement",
         Reason::DoubleSignForfeit => "double-sign forfeit",
         Reason::MutualResignation => "mutual resignation",
+        Reason::ThreefoldClaim => "threefold repetition (claimed)",
+        Reason::FiftyMoveClaim => "fifty-move rule (claimed)",
     }
 }
 

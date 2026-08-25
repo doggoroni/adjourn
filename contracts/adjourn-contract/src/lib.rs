@@ -89,7 +89,12 @@ impl ContractInterface for Contract {
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
         let params = decode_params(&parameters)?;
-        let mut game = decode_state(state.as_ref())?;
+        // Normalize the BASE state too, exactly as `summarize_state` and
+        // `get_state_delta` do. `validate_state` is permissive by design, so a
+        // peer can PUT a crafted over-K state; without this the base keeps
+        // records eviction should have dropped, and this function's output
+        // would differ from what the other two report about the same bytes.
+        let mut game = decode_state(state.as_ref())?.filter_valid(&params);
 
         for update in data {
             match update {
@@ -104,16 +109,19 @@ impl ContractInterface for Contract {
                     }
                     let delta: Delta = from_reader::<Delta, &[u8]>(d.as_ref())
                         .map_err(|e| ContractError::Deser(e.to_string()))?;
-                    let mut incoming = GameState::empty();
+                    // Verify every record before absorbing any: `apply_delta`
+                    // absorbs all then evicts ONCE, which is what keeps this
+                    // an O(n) pass rather than the O(n^2 log n) that calling
+                    // `insert_verified` (evict-per-record) in a loop would be.
                     for rec in &delta {
-                        if !incoming.insert_verified(rec, &params) {
+                        if !rec.verify(&params) {
                             return Err(ContractError::InvalidUpdateWithInfo {
                                 reason: "delta contains a record not signed by either player"
                                     .into(),
                             });
                         }
                     }
-                    game.merge(&incoming, &params);
+                    game.apply_delta(&delta, &params);
                 }
                 // Both halves of a two-step sync can arrive together.
                 UpdateData::StateAndDelta { state, delta } => {
@@ -124,14 +132,17 @@ impl ContractInterface for Contract {
                     if !delta.as_ref().is_empty() {
                         let delta: Delta = from_reader::<Delta, &[u8]>(delta.as_ref())
                             .map_err(|e| ContractError::Deser(e.to_string()))?;
+                        // Same batching as the `Delta` arm above: verify first,
+                        // then one absorb-all-then-evict-once pass.
                         for rec in &delta {
-                            if !game.insert_verified(rec, &params) {
+                            if !rec.verify(&params) {
                                 return Err(ContractError::InvalidUpdateWithInfo {
                                     reason: "delta contains a record not signed by either player"
                                         .into(),
                                 });
                             }
                         }
+                        game.apply_delta(&delta, &params);
                     }
                 }
                 // This game has no related contracts: params are exchanged out
@@ -154,8 +165,15 @@ impl ContractInterface for Contract {
         parameters: Parameters<'static>,
         state: State<'static>,
     ) -> Result<StateSummary<'static>, ContractError> {
-        let _ = decode_params(&parameters)?;
+        let params = decode_params(&parameters)?;
         let game = decode_state(state.as_ref())?;
+        // Normalize before summarizing: a peer can PUT a crafted over-K state
+        // (validate_state is permissive by design), and without this an
+        // evicted-away record would summarize forever and its delta would
+        // re-offer forever -- the same never-settles shape as the encoded-
+        // empty-delta bug below in `get_state_delta`. `filter_valid` verifies
+        // then evicts, so a forged low-id record cannot evict an honest one.
+        let game = game.filter_valid(&params);
         Ok(StateSummary::from(encode(&game.summarize())?))
     }
 
@@ -164,8 +182,12 @@ impl ContractInterface for Contract {
         state: State<'static>,
         summary: StateSummary<'static>,
     ) -> Result<StateDelta<'static>, ContractError> {
-        let _ = decode_params(&parameters)?;
+        let params = decode_params(&parameters)?;
         let game = decode_state(state.as_ref())?;
+        // See `summarize_state`: normalize a possibly-crafted over-K state
+        // before diffing against it, so an evicted-away record is not offered
+        // forever.
+        let game = game.filter_valid(&params);
 
         // An empty summary means the peer holds nothing, so it needs everything
         // — NOT that it is already up to date.

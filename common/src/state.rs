@@ -6,9 +6,21 @@
 //! at all. Ordering comes from the parent-hash chain, resolved at projection
 //! time (see `project.rs`).
 
-use crate::types::{GameParams, Record, RecordId};
+use crate::types::{GameParams, KeyBytes, Kind, Record, RecordId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// One signer's records of one kind at one ply.
+///
+/// Per-signer grouping is what makes eviction safe against an opponent: your
+/// records only ever compete with your own, so nobody else can evict your move,
+/// and a player who spams themselves out of a legal move merely stalls their
+/// own game.
+type Group = (KeyBytes, Kind, u16);
+
+fn group_of(rec: &Record) -> Option<Group> {
+    Some((rec.signer, rec.body.kind(), rec.body.ply()?))
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GameState {
@@ -171,6 +183,50 @@ impl GameState {
         }
     }
 
+    /// Keep only the K smallest ids in each `(signer, kind, ply)` group.
+    ///
+    /// This is what makes state bounded rather than merely small, and it keeps
+    /// the monoid intact because top-K distributes over union:
+    ///
+    /// ```text
+    /// topK(topK(A) ∪ topK(B)) = topK(A ∪ B)
+    /// ```
+    ///
+    /// The K smallest ids of `A ∪ B` are necessarily present in
+    /// `topK(A) ∪ topK(B)`, so filtering distributes and associativity,
+    /// commutativity and idempotence all survive.
+    ///
+    /// Eviction sorts blind, by id. It CANNOT consider chess legality: legality
+    /// is a function of the position, which is a function of the chain, which is
+    /// a function of which records are present -- so a legality-aware rule would
+    /// evict different records in a partial state and peers would diverge.
+    ///
+    /// Sorting blind means a cheater can bury a *legality-based* fraud proof
+    /// under lower-id junk. That is why the double-sign proof is structural
+    /// instead (`project::double_signed`): it counts `Move` records per
+    /// `(signer, ply)`, and K=2 FLOORS this group rather than emptying it, so
+    /// burial cannot dissolve the proof -- the junk used to bury it is itself
+    /// two records in one group. This is what makes K=2 load-bearing.
+    /// Test: `a_buried_double_sign_still_forfeits`.
+    pub fn evict(&mut self) {
+        // BTreeMap iterates in id order, so each group's ids arrive ascending
+        // and the first K are the K smallest.
+        let mut groups: BTreeMap<Group, Vec<RecordId>> = BTreeMap::new();
+        for (id, rec) in &self.records {
+            if let Some(g) = group_of(rec) {
+                groups.entry(g).or_default().push(*id);
+            }
+        }
+        for ((_, kind, _), ids) in groups {
+            let k = kind.k();
+            if ids.len() > k {
+                for id in &ids[k..] {
+                    self.records.remove(id);
+                }
+            }
+        }
+    }
+
     /// The monoid operation. Associative, commutative, idempotent, with the
     /// empty state as identity.
     ///
@@ -181,6 +237,7 @@ impl GameState {
         for rec in other.records.values() {
             self.absorb(rec, params);
         }
+        self.evict();
     }
 
     pub fn merged(&self, other: &GameState, params: &GameParams) -> GameState {
@@ -192,6 +249,7 @@ impl GameState {
     /// Admit a single record from an untrusted source.
     pub fn insert_verified(&mut self, rec: &Record, params: &GameParams) -> bool {
         self.absorb(rec, params);
+        self.evict();
         rec.verify(params)
     }
 
@@ -230,8 +288,9 @@ impl GameState {
 
     pub fn apply_delta(&mut self, delta: &Delta, params: &GameParams) {
         for rec in delta {
-            self.insert_verified(rec, params);
+            self.absorb(rec, params);
         }
+        self.evict();
     }
 
     pub fn len(&self) -> usize {
