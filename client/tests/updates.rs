@@ -44,7 +44,11 @@ async fn a_move_reaches_the_other_peer_as_an_update() {
         .await
         .expect("next_update failed")
         .expect("alice's move must produce a notification");
-    assert_eq!(*id, contract_bytes_of(&mut bob, "bob").await, "names our game");
+    assert_eq!(
+        *id,
+        contract_bytes_of(&mut bob, "bob").await,
+        "names our game"
+    );
 
     // Checking the id proves a notification exists; it does not prove the
     // notification carried the move. Decode and project it.
