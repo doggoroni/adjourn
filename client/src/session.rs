@@ -17,9 +17,10 @@
 //! `play_move` — run local pre-checks before ever bothering the delegate.
 
 use adjourn_core::delegate_api::{GameSummary, Refusal, Request, Response, Side};
+use adjourn_core::state::Delta;
 use adjourn_core::{legal_moves, project, Body, GameParams, GameState, Status};
 use anyhow::{bail, Context};
-use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId};
+use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId, UpdateData};
 use rand::RngCore;
 use shakmaty::Color;
 
@@ -341,6 +342,66 @@ pub async fn show_label<N: NodeClient>(
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
     Ok(g.status)
+}
+
+/// Follow a game, calling `on_status` with the projection after every update.
+///
+/// Merges each notification into the held state rather than replacing it: the
+/// payload may be a `State`, a `Delta`, or a `StateAndDelta`, and merge is what
+/// makes all three land on the same answer regardless of arrival order.
+/// Unrecognised `UpdateData` variants are ignored -- the enum is
+/// `#[non_exhaustive]`, and a panic here would end a healthy session.
+pub async fn watch_label<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+    mut on_status: impl FnMut(&Status),
+) -> anyhow::Result<()> {
+    let g = open_game(node, label, contract_wasm).await?;
+    let mut state = g.state;
+    on_status(&project(&state, &g.params));
+
+    loop {
+        let Some((id, update)) = node.next_update().await? else {
+            continue;
+        };
+        // `OpenGame.contract` is a raw `[u8; 32]`; `ContractInstanceId` derefs
+        // to the same, so compare through the deref rather than by type.
+        if *id != g.contract {
+            continue; // a different game on the same connection
+        }
+        // A `State` payload is an encoded `GameState`; a `Delta` payload is an
+        // encoded `Delta`, which is `Vec<Record>` -- a DIFFERENT type with a
+        // different encoding. Decoding one as the other fails silently and the
+        // board simply never updates, so the two arms must not be merged.
+        match update {
+            UpdateData::State(bytes) => {
+                if let Some(incoming) = GameState::decode(bytes.as_ref()) {
+                    state.merge(&incoming, &g.params);
+                }
+            }
+            UpdateData::Delta(bytes) => {
+                if let Ok(delta) = ciborium::from_reader::<Delta, &[u8]>(bytes.as_ref()) {
+                    state.apply_delta(&delta, &g.params);
+                }
+            }
+            UpdateData::StateAndDelta { state: s, delta } => {
+                if let Some(incoming) = GameState::decode(s.as_ref()) {
+                    state.merge(&incoming, &g.params);
+                }
+                if let Ok(delta) = ciborium::from_reader::<Delta, &[u8]>(delta.as_ref()) {
+                    state.apply_delta(&delta, &g.params);
+                }
+            }
+            // `UpdateData` is `#[non_exhaustive]`. Ignore what we do not know.
+            _ => continue,
+        }
+        let status = project(&state, &g.params);
+        on_status(&status);
+        if status.is_over() {
+            return Ok(());
+        }
+    }
 }
 
 /// Play `uci` for `label`.

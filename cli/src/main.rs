@@ -347,8 +347,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             output::render_status(&label, &status);
         }
 
-        Command::Watch { label: _ } => {
-            bail!("watch: not implemented yet; poll with `adjourn show`");
+        Command::Watch { label } => {
+            let contract_wasm = read_wasm(
+                &cli.contract_wasm,
+                "the contract WASM",
+                "scripts/build-contract.sh",
+            )?;
+            let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
+            session::watch_label(&mut node, &label, contract_wasm, |status| {
+                output::render_status(&label, status);
+            })
+            .await?;
         }
     }
     Ok(())
