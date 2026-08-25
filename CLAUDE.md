@@ -427,7 +427,26 @@ of those would leave a subscription behind it that nothing ever tears down.
 
 `watch_label` is the one flow that needs a subscription, so it asks for its
 own: after calling `open_game` it issues a second, subscribing GET
-(`node.get(id, true)`) before entering its update loop. **This is worth
+(`node.get(id, true)`) before entering its update loop, and **merges that
+GET's returned state** rather than discarding it. The merge is what closes the
+lost-update window: between `open_game`'s non-subscribing GET and the
+subscription being established, the opponent's move is broadcast to
+subscribers this client is not yet among, and would be lost with no error
+anywhere — a terminal on a stale position, again indistinguishable from an
+idle game. `WsClient::get` additionally passes `blocking_subscribe: subscribe`
+so the node establishes the subscription before answering, and queues any
+`UpdateNotification` that arrives while a request loop is waiting on its own
+response (`pending` in `cli/src/ws.rs`) instead of dropping it — the receive
+loops each skip messages they are not waiting for, and one connection carries
+both. `watch_label` also returns immediately if the game is already decided:
+a finished game will never produce another notification, so entering the loop
+would print the final position and hang.
+
+`watch_label` returns `Ok(())` when `next_update` yields `None`. Against
+`WsClient` that is dead code (it can never return `None`, see below); against
+`FakeNode` a `continue` there is a yield-free hot loop that wedges a
+current-thread runtime — which is exactly why the function went untested for
+as long as it did. **This is worth
 calling out because of how the omission was found, not just what the fix is.**
 `watch` originally never subscribed. Against a real node it rendered the
 opening position once and then blocked on `next_update` forever —
@@ -435,10 +454,13 @@ indistinguishable, from the outside, from a healthy idle game waiting on the
 opponent. No test caught it, because `FakeNode` ignored the subscribe flag
 entirely and handed out updates from a shared log regardless of who had asked
 to watch. `FakeNode` now tracks subscriptions per node (`subscribed:
-BTreeSet<[u8; 32]>` in `client/src/fake.rs`) and `next_update` only yields
-entries for contracts that node subscribed to via `get(.., true)` — so a
-future command that forgets to subscribe fails a test instead of failing
-silently against a live node. It is the same argument the rest of this file
+BTreeMap<[u8; 32], usize>` in `client/src/fake.rs`) and `next_update` only
+yields entries for contracts that node subscribed to via `get(.., true)`, and
+only those that landed **at or after** the subscribe point — the `usize` is
+the log length at that moment. A subscription is not retroactive on a real
+node, and a fake that replayed history to a late subscriber would hide the
+lost-update window described below. So a future command that forgets to
+subscribe fails a test instead of failing silently against a live node. It is the same argument the rest of this file
 already makes for `FakeNode` running the real contract and delegate code: a
 fake that grants a permission the real node requires is only testing the
 happy path, and is worse than no fake at all.
@@ -454,10 +476,34 @@ also has to be read per-implementation: `Ok(None)` means "nothing waiting" for
 socket's `recv()` and has no such log to exhaust, so for a real node this call
 either yields an update or does not return — it can never produce `None`.
 
-`watch` has no automated test against a real node. The subscribe-then-loop
-mechanism is covered by `client/tests/updates.rs` against `FakeNode`; the
-CLI's argument parsing and rendering for `adjourn watch` is not exercised by
-any test, automated or otherwise.
+`watch` has no automated test against a real node.
+`client/tests/updates.rs::watch_label_reports_the_opponents_move` drives
+`watch_label` itself against two `FakeNode`s — subscribe, opponent moves,
+callback fires with `ply == 1` — so the id filter, the merge arms and the
+termination check all execute. The CLI's argument parsing and rendering for
+`adjourn watch` is not exercised by any test, automated or otherwise.
+
+`FakeNode` broadcasts the **delta** for an update and whole **state** for a
+PUT (`Broadcast` in `client/src/fake.rs`), matching what a real node sends
+subscribers: `sign_and_submit` submits a delta, so `UpdateData::Delta` is the
+arm `watch` actually runs in production. A fake that only ever emitted `State`
+left the live arm untested. All three arms now *report* a decode failure
+instead of swallowing it (`decode_state_payload` / `decode_delta_payload` in
+`session.rs`) — a dropped decode error is a board that silently never updates,
+which is the same failure signature this section has already described twice.
+
+`adjourn-client` takes randomness as a **parameter** (`invite_new`'s `entropy`
+and `nonce`, `invite_accept`'s `entropy`) rather than generating it. The crate
+exists to be reachable from a browser, and `rand` -> `rand_core` ->
+`getrandom` is a hard compile error on `wasm32-unknown-unknown` — the same
+dependency banned from the contract and delegate graphs, which a
+workspace-wide feature unification would drag in behind this crate. The CLI
+supplies the bytes from `rand`; a browser will supply
+`crypto.getRandomValues`. Hoisting where the bytes come from does not change
+who *authors* them: the `GameParams` nonce still has exactly one author, the
+inviter. CI asserts the property directly with `cargo check -p adjourn-client
+--no-default-features --target wasm32-unknown-unknown`; a native
+`--no-default-features` check cannot catch it.
 
 ## Delegate
 
@@ -511,9 +557,9 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 140 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 141 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
-9 delegate adapter tests, and 15 `adjourn-client` integration tests. The
+9 delegate adapter tests, and 16 `adjourn-client` integration tests. The
 algebra tests are the point; they run randomized partitions and delivery
 orders. Keep them green. New state-shape features need a corresponding law
 test, not just a happy-path test.
@@ -539,14 +585,15 @@ test, not just a happy-path test.
   hijack attempt from a different origin refused as `WrongOrigin`, and a
   double-sign attempt refused through the real dispatch path, not just the
   policy layer beneath it.
-- `client/tests/` (15, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs`
-  4, `moves.rs` 4, `setup.rs` 2, `updates.rs` 2) — `adjourn_client::session`'s
+- `client/tests/` (16, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs`
+  4, `moves.rs` 4, `setup.rs` 2, `updates.rs` 3) — `adjourn_client::session`'s
   flows run against `FakeNode` (real contract and delegate code, in-memory
   transport): both players deriving the same contract, a build mismatch
   refused loudly, a full scholar's-mate game end to end, out-of-turn moves
   failing before signing, a double-sign attempt refused by the delegate, and
-  (`updates.rs`) `watch_label`'s subscribe-then-loop against `FakeNode`'s
-  per-node subscription tracking — see "Client" above. These flow tests moved
+  (`updates.rs`) `watch_label` driven end to end against `FakeNode`'s per-node
+  subscription tracking, asserting the notification is a `Delta` and that the
+  watcher's callback reports the opponent's move — see "Client" above. These flow tests moved
   here from `cli/tests/` when the session logic was extracted into
   `adjourn-client`; the CLI crate itself no longer has a `tests/` directory.
   Several of these read the compiled contract WASM off disk and skip

@@ -15,10 +15,25 @@ use adjourn_contract::Contract;
 use adjourn_core::delegate_api::{Request, Response};
 use adjourn_delegate::secrets::{MemoryStore, SecretStore};
 use freenet_stdlib::prelude::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::node::NodeClient;
+
+/// One entry in the world's write log: what a subscribed peer would be told.
+///
+/// A real node broadcasts to subscribers the payload the writer submitted. A
+/// PUT carries whole state; an UPDATE carries the delta `sign_and_submit`
+/// sent. A fake that always announced `State` would leave `watch_label`'s
+/// `Delta` arm -- the arm that actually runs in production -- untested, so
+/// the two are kept apart here exactly as the node keeps them apart.
+#[derive(Clone)]
+pub enum Broadcast {
+    /// A PUT: the whole encoded `GameState`.
+    State(Vec<u8>),
+    /// An UPDATE: the encoded `Delta` (`Vec<Record>`) the writer submitted.
+    Delta(Vec<u8>),
+}
 
 /// Contract params and state, keyed by the contract instance id's raw bytes.
 ///
@@ -42,7 +57,7 @@ use crate::node::NodeClient;
 #[derive(Default)]
 pub struct WorldInner {
     pub contracts: BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>,
-    pub log: Vec<([u8; 32], Vec<u8>)>,
+    pub log: Vec<([u8; 32], Broadcast)>,
 }
 
 pub type World = Arc<Mutex<WorldInner>>;
@@ -91,11 +106,17 @@ pub struct FakeNode {
     world: World,
     store: WorldBackedStore,
     cursor: usize,
-    /// Contracts this node has asked to be subscribed to via `get(.., true)`.
-    /// `next_update` only surfaces log entries for ids in this set -- modeling
+    /// Contracts this node has asked to be subscribed to via `get(.., true)`,
+    /// each mapped to the log length AT THE MOMENT IT SUBSCRIBED.
+    ///
+    /// `next_update` surfaces a log entry only for a subscribed id, and only
+    /// if the entry landed at or after that id's subscribe point -- modeling
     /// the real node's requirement that watching needs an explicit subscribe,
-    /// not just any prior read.
-    subscribed: BTreeSet<[u8; 32]>,
+    /// and that a subscription is not retroactive. Replaying history to a
+    /// late subscriber would be a guarantee no real node makes, and would
+    /// hide exactly the lost-update window `watch_label` has to defend
+    /// against.
+    subscribed: BTreeMap<[u8; 32], usize>,
 }
 
 impl FakeNode {
@@ -107,7 +128,7 @@ impl FakeNode {
             },
             world,
             cursor: 0,
-            subscribed: BTreeSet::new(),
+            subscribed: BTreeMap::new(),
         }
     }
 
@@ -130,16 +151,15 @@ impl NodeClient for FakeNode {
         id: ContractInstanceId,
         subscribe: bool,
     ) -> anyhow::Result<Option<Vec<u8>>> {
+        let world = self.world.lock().expect("world lock poisoned");
         if subscribe {
-            self.subscribed.insert(*id);
+            // `or_insert`, not `insert`: re-subscribing must not move an
+            // existing subscription's start point forward past entries it has
+            // not delivered yet.
+            let now = world.log.len();
+            self.subscribed.entry(*id).or_insert(now);
         }
-        Ok(self
-            .world
-            .lock()
-            .expect("world lock poisoned")
-            .contracts
-            .get(&*id)
-            .map(|(_, state)| state.clone()))
+        Ok(world.contracts.get(&*id).map(|(_, state)| state.clone()))
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {
@@ -148,7 +168,7 @@ impl NodeClient for FakeNode {
         world
             .contracts
             .insert(*id, (container.params(), state.clone()));
-        world.log.push((*id, state));
+        world.log.push((*id, Broadcast::State(state)));
         Ok(())
     }
 
@@ -166,16 +186,17 @@ impl NodeClient for FakeNode {
         let modification = Contract::update_state(
             params.clone(),
             State::from(current),
-            vec![UpdateData::Delta(StateDelta::from(delta))],
+            vec![UpdateData::Delta(StateDelta::from(delta.clone()))],
         )
         .map_err(|e| anyhow::anyhow!("update_state: {e:?}"))?;
-        let new_state = modification.unwrap_valid();
+        let new_state = modification.unwrap_valid().as_ref().to_vec();
 
         let mut world = self.world.lock().expect("world lock poisoned");
-        world
-            .contracts
-            .insert(*id, (params, new_state.as_ref().to_vec()));
-        world.log.push((*id, new_state.as_ref().to_vec()));
+        world.contracts.insert(*id, (params, new_state));
+        // Broadcast the DELTA, not the new state: that is what a real node
+        // sends to subscribers for an update, and therefore what `watch`
+        // actually decodes in production.
+        world.log.push((*id, Broadcast::Delta(delta)));
         Ok(())
     }
 
@@ -188,22 +209,26 @@ impl NodeClient for FakeNode {
     ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
         loop {
             let entry = {
-                let world = self.world.lock().expect("world lock");
+                let world = self.world.lock().expect("world lock poisoned");
                 world.log.get(self.cursor).cloned()
             };
-            let Some((id, bytes)) = entry else {
+            let Some((id, broadcast)) = entry else {
                 return Ok(None);
             };
+            let at = self.cursor;
             self.cursor += 1;
-            if !self.subscribed.contains(&id) {
-                // Not subscribed to this contract: skip it, but the cursor
-                // has already advanced past it so it never stalls the log.
-                continue;
+            // Not subscribed, or subscribed only after this entry landed:
+            // skip it. The cursor has already advanced past it, so it never
+            // stalls the log.
+            match self.subscribed.get(&id) {
+                Some(from) if at >= *from => {}
+                _ => continue,
             }
-            return Ok(Some((
-                ContractInstanceId::new(id),
-                UpdateData::State(State::from(bytes)),
-            )));
+            let update = match broadcast {
+                Broadcast::State(bytes) => UpdateData::State(State::from(bytes)),
+                Broadcast::Delta(bytes) => UpdateData::Delta(StateDelta::from(bytes)),
+            };
+            return Ok(Some((ContractInstanceId::new(id), update)));
         }
     }
 }

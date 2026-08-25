@@ -37,8 +37,12 @@ tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "time"] 
 tokio-tungstenite = "=0.27.0"
 anyhow = "=1.0.100"
 thiserror = "=2.0.20"
-# The CLI is a host binary, not the contract or delegate — the ban on `rand`
-# in those crates does not apply here.
+# Used ONLY by the CLI, which is a host binary — the ban on `rand` in the
+# contract and delegate crates does not apply there. It is equally banned from
+# `adjourn-client`, for a second reason: that crate must compile for
+# wasm32-unknown-unknown, where `rand` -> `rand_core` -> `getrandom` is a hard
+# compile error. `adjourn-client` therefore takes randomness as a parameter;
+# the CLI passes bytes from here, a browser passes `crypto.getRandomValues`.
 rand = "=0.9.5"
 
 [workspace.package]

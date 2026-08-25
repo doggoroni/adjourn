@@ -2,8 +2,11 @@ mod common;
 
 use adjourn_client::fake::{shared_world, FakeNode};
 use adjourn_client::node::NodeClient;
-use adjourn_client::session::{game_bind, invite_accept, invite_new, play_move, show_label};
+use adjourn_client::session::{
+    game_bind, invite_accept, invite_new, play_move, show_label, watch_label,
+};
 use adjourn_core::delegate_api::Side;
+use adjourn_core::state::Delta;
 use adjourn_core::GameState;
 use freenet_stdlib::prelude::{ContractInstanceId, UpdateData};
 
@@ -15,8 +18,10 @@ async fn a_move_reaches_the_other_peer_as_an_update() {
     };
     let world = shared_world();
     let (mut alice, mut bob) = (FakeNode::new(world.clone()), FakeNode::new(world));
-    let invite = invite_new(&mut alice, "alice", Side::White).await.unwrap();
-    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone())
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
         .await
         .unwrap();
     game_bind(&mut alice, "alice", &offer, wasm.clone())
@@ -57,11 +62,20 @@ async fn a_move_reaches_the_other_peer_as_an_update() {
 
     // Checking the id proves a notification exists; it does not prove the
     // notification carried the move. Decode and project it.
-    let UpdateData::State(bytes) = update else {
-        panic!("FakeNode emits State payloads");
+    //
+    // The payload is a DELTA, not a state: `sign_and_submit` submits a delta
+    // and a real node broadcasts that delta to subscribers, so this is the
+    // arm `watch_label` actually runs in production. Asserting the variant is
+    // part of the test -- a fake that quietly switched to `State` would take
+    // the live arm back out of coverage.
+    let UpdateData::Delta(bytes) = update else {
+        panic!("an update-originated notification carries the submitted Delta");
     };
-    let carried = GameState::decode(bytes.as_ref()).expect("payload decodes");
-    let status = adjourn_core::project(&carried, &params_of(&mut bob, "bob").await);
+    let delta: Delta = ciborium::from_reader(bytes.as_ref()).expect("payload decodes as a Delta");
+    let params = params_of(&mut bob, "bob").await;
+    let mut carried = GameState::empty();
+    carried.apply_delta(&delta, &params);
+    let status = adjourn_core::project(&carried, &params);
     assert_eq!(status.ply, 1, "the notification carries alice's move");
 
     let after = show_label(&mut bob, "bob", wasm).await.unwrap();
@@ -107,8 +121,10 @@ async fn next_update_is_empty_when_nothing_changed() {
     };
     let world = shared_world();
     let (mut alice, mut bob) = (FakeNode::new(world.clone()), FakeNode::new(world));
-    let invite = invite_new(&mut alice, "alice", Side::White).await.unwrap();
-    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone())
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
         .await
         .unwrap();
     game_bind(&mut alice, "alice", &offer, wasm.clone())
@@ -125,3 +141,67 @@ async fn next_update_is_empty_when_nothing_changed() {
         "no write happened, so there is nothing to report"
     );
 }
+
+/// `watch_label` end to end: bob watches, alice moves, bob's callback fires.
+///
+/// This is the only test that drives `watch_label` itself -- the id filter,
+/// the merge arms and the termination check. It terminates because
+/// `FakeNode::next_update` returns `Ok(None)` once the log is drained and
+/// `watch_label` returns on `None`; a real `WsClient` blocks instead and
+/// never returns `None`, so the loop there runs until the game ends.
+#[tokio::test]
+async fn watch_label_reports_the_opponents_move() {
+    let Some(wasm) = common::contract_wasm() else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+    let world = shared_world();
+    let (mut alice, mut bob) = (FakeNode::new(world.clone()), FakeNode::new(world));
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
+        .await
+        .unwrap();
+    game_bind(&mut alice, "alice", &offer, wasm.clone())
+        .await
+        .unwrap();
+
+    // Subscribe BEFORE alice moves, so her move lands in the log after bob's
+    // subscribe point and is genuinely delivered as a notification.
+    // `watch_label`'s own subscribing GET will not move that point forward
+    // (`FakeNode` uses `or_insert`), so the loop below really does run the
+    // notification path rather than only the opening GET.
+    let contract = contract_bytes_of(&mut bob, "bob").await;
+    bob.get(ContractInstanceId::new(contract), true)
+        .await
+        .unwrap();
+
+    play_move(&mut alice, "alice", "e2e4", wasm.clone())
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    watch_label(&mut bob, "bob", wasm, |status| seen.push(status.ply))
+        .await
+        .expect("watch runs to the end of the log");
+
+    assert!(
+        seen.len() >= 2,
+        "the opening projection plus at least one notification, got {seen:?}"
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some(1),
+        "bob's last reported position includes alice's move, got {seen:?}"
+    );
+}
+
+/// Fixed test entropy. `adjourn-client` takes randomness as a parameter (it
+/// must compile for wasm32, where `rand` does not), so tests supply constants
+/// -- deterministic keys and a deterministic contract id, which is strictly
+/// better for a test than a fresh random one every run. The two sides differ
+/// so they never derive the same signing key.
+const ALICE_ENTROPY: [u8; 32] = [0xa1; 32];
+const BOB_ENTROPY: [u8; 32] = [0xb0; 32];
+/// The `GameParams` nonce the inviter authors.
+const NONCE: [u8; 16] = [0x5e; 16];

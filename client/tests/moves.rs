@@ -10,8 +10,10 @@ async fn setup() -> Option<(FakeNode, FakeNode, Vec<u8>)> {
     let wasm = common::contract_wasm()?;
     let world = shared_world();
     let (mut alice, mut bob) = (FakeNode::new(world.clone()), FakeNode::new(world));
-    let invite = invite_new(&mut alice, "alice", Side::White).await.unwrap();
-    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone())
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
         .await
         .unwrap();
     game_bind(&mut alice, "alice", &offer, wasm.clone())
@@ -88,3 +90,13 @@ async fn draw_claim_refuses_when_there_is_no_ground_to_claim() {
     let text = format!("{err:#}").to_lowercase();
     assert!(text.contains("no draw to claim"), "got: {err:#}");
 }
+
+/// Fixed test entropy. `adjourn-client` takes randomness as a parameter (it
+/// must compile for wasm32, where `rand` does not), so tests supply constants
+/// -- deterministic keys and a deterministic contract id, which is strictly
+/// better for a test than a fresh random one every run. The two sides differ
+/// so they never derive the same signing key.
+const ALICE_ENTROPY: [u8; 32] = [0xa1; 32];
+const BOB_ENTROPY: [u8; 32] = [0xb0; 32];
+/// The `GameParams` nonce the inviter authors.
+const NONCE: [u8; 16] = [0x5e; 16];

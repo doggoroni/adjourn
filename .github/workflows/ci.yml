@@ -90,6 +90,14 @@ jobs:
             exit 1
           fi
 
+      # `adjourn-client` exists SOLELY to be reachable from a browser, so a
+      # version of it that does not compile for the browser's target is not
+      # doing its job. A native `--no-default-features` check cannot catch
+      # that: `rand`/`getrandom` only hard-error on wasm32-unknown-unknown.
+      # Without this step the defect returns with the next dependency.
+      - name: Assert adjourn-client compiles for the browser
+        run: cargo check -p adjourn-client --no-default-features --target wasm32-unknown-unknown --locked
+
       - name: Test
         run: cargo test --workspace --locked
 

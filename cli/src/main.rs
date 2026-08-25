@@ -80,7 +80,7 @@ enum Command {
     },
     #[command(subcommand)]
     Draw(DrawCommand),
-    /// Hold a subscription open and stream updates. Not implemented yet.
+    /// Hold a subscription open and stream updates until the game ends.
     Watch {
         #[arg(long)]
         label: String,
@@ -175,8 +175,23 @@ fn read_wasm(path: &Path, what: &str, script: &str) -> anyhow::Result<Vec<u8>> {
 /// stub -- caller entropy is the only real randomness available here. `None`
 /// gets refused by the delegate (`Refusal::NoEntropy`), and a constant would
 /// make every key this CLI generates identical.
+///
+/// This also supplies the randomness `adjourn_client::session` needs but
+/// cannot generate: that crate has to compile for wasm32-unknown-unknown,
+/// where `rand` is a hard compile error, so it takes these bytes as
+/// parameters. A browser front end supplies `crypto.getRandomValues` in this
+/// function's place.
 fn random_entropy() -> [u8; 32] {
     let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes
+}
+
+/// The `GameParams` nonce, authored by the inviter and by nobody else -- see
+/// `session::invite_new`. Both sides must derive byte-identical params or
+/// they sit on different contracts with no error anywhere.
+fn random_nonce() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     bytes
 }
@@ -247,7 +262,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
         Command::Invite(InviteCommand::New { label, side }) => {
             let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
-            let invite = session::invite_new(&mut node, &label, side.into()).await?;
+            let invite = session::invite_new(
+                &mut node,
+                &label,
+                side.into(),
+                random_entropy(),
+                random_nonce(),
+            )
+            .await?;
             output::render_invite(&invite);
         }
 
@@ -259,7 +281,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )?;
             let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
             let invite = Invite::decode(&invite).context("decoding invite")?;
-            let offer = session::invite_accept(&mut node, &label, &invite, contract_wasm).await?;
+            let offer =
+                session::invite_accept(&mut node, &label, &invite, contract_wasm, random_entropy())
+                    .await?;
             output::render_offer(&offer);
         }
 

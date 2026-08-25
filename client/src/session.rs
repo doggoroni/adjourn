@@ -21,35 +21,46 @@ use adjourn_core::state::Delta;
 use adjourn_core::{legal_moves, project, Body, GameParams, GameState, Status};
 use anyhow::{bail, Context};
 use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId, UpdateData};
-use rand::RngCore;
 use shakmaty::Color;
 
 use crate::invite::{GameOffer, Invite};
 use crate::node::{contract_container, NodeClient};
-
-fn random_entropy() -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    bytes
-}
 
 fn refused(refusal: Refusal) -> anyhow::Error {
     anyhow::anyhow!("delegate refused: {refusal}")
 }
 
 /// Ask the delegate for a fresh signing key under `label`, then wrap the
-/// public half in an [`Invite`] carrying a nonce this side authors. The
-/// nonce has exactly one author so the two sides can never derive different
-/// `GameParams` from it.
+/// public half in an [`Invite`] carrying `nonce`.
+///
+/// Both random inputs are **parameters, not generated here**. This crate has
+/// to compile for `wasm32-unknown-unknown` (it exists to be reachable from a
+/// browser), and every `rand`/`getrandom` path hard-errors on that target --
+/// the same dependency `CLAUDE.md` bans anywhere near the contract and
+/// delegate graphs, which a workspace-wide feature unification would drag in
+/// behind this crate. So the caller supplies the bytes: the CLI from `rand`,
+/// the browser from `crypto.getRandomValues`.
+///
+/// `entropy` is the caller's contribution to the delegate's key derivation
+/// (`Request::CreateGameKey.caller_entropy`); the delegate mixes it with host
+/// randomness and never trusts it alone. `nonce` goes into `GameParams`.
+///
+/// Hoisting where the bytes come from does **not** change who authors them:
+/// the nonce still has exactly one author, the inviter. That is what stops
+/// the two sides deriving different `GameParams`, landing on different
+/// contract ids, and each seeing a game the other never joins with no error
+/// anywhere.
 pub async fn invite_new<N: NodeClient>(
     node: &mut N,
     label: &str,
     side: Side,
+    entropy: [u8; 32],
+    nonce: [u8; 16],
 ) -> anyhow::Result<Invite> {
     let response = node
         .delegate(Request::CreateGameKey {
             label: label.to_string(),
-            caller_entropy: Some(random_entropy()),
+            caller_entropy: Some(entropy),
         })
         .await
         .context("CreateGameKey")?;
@@ -59,9 +70,6 @@ pub async fn invite_new<N: NodeClient>(
         other => bail!("unexpected response to CreateGameKey: {other:?}"),
     };
 
-    let mut nonce = [0u8; 16];
-    rand::rng().fill_bytes(&mut nonce);
-
     Ok(Invite::new(side, public_key, nonce))
 }
 
@@ -70,16 +78,22 @@ pub async fn invite_new<N: NodeClient>(
 /// from `contract_wasm`, PUT the contract with empty state, bind the
 /// delegate to it, and return the [`GameOffer`] to send back to the
 /// inviter.
+///
+/// `entropy` is the caller's contribution to the delegate's key derivation,
+/// supplied rather than generated for the reason spelled out on
+/// [`invite_new`]. This side authors **no** nonce: it takes the inviter's,
+/// which is the whole point of the invite carrying one.
 pub async fn invite_accept<N: NodeClient>(
     node: &mut N,
     label: &str,
     invite: &Invite,
     contract_wasm: Vec<u8>,
+    entropy: [u8; 32],
 ) -> anyhow::Result<GameOffer> {
     let response = node
         .delegate(Request::CreateGameKey {
             label: label.to_string(),
-            caller_entropy: Some(random_entropy()),
+            caller_entropy: Some(entropy),
         })
         .await
         .context("CreateGameKey")?;
@@ -344,6 +358,27 @@ pub async fn show_label<N: NodeClient>(
     Ok(g.status)
 }
 
+/// Decode an update notification's `State` half, or say so.
+///
+/// Both this and [`decode_delta_payload`] REPORT failure rather than
+/// swallowing it. A dropped decode error leaves a board that silently never
+/// updates with no error anywhere -- exactly the symptom of decoding a
+/// `Delta` as a `GameState` or vice versa, which is why the two are separate
+/// functions over separate payload halves.
+fn decode_state_payload(bytes: &[u8]) -> anyhow::Result<GameState> {
+    GameState::decode(bytes).ok_or_else(|| {
+        anyhow::anyhow!("an update notification's State payload did not decode as a GameState")
+    })
+}
+
+/// Decode an update notification's `Delta` half, or say so. A `Delta` is
+/// `Vec<Record>` -- a DIFFERENT type with a different encoding from
+/// `GameState`, not an interchangeable one.
+fn decode_delta_payload(bytes: &[u8]) -> anyhow::Result<Delta> {
+    ciborium::from_reader::<Delta, &[u8]>(bytes)
+        .map_err(|e| anyhow::anyhow!("an update notification's Delta payload did not decode: {e}"))
+}
+
 /// Follow a game, calling `on_status` with the projection after every update.
 ///
 /// Merges each notification into the held state rather than replacing it: the
@@ -359,16 +394,51 @@ pub async fn watch_label<N: NodeClient>(
 ) -> anyhow::Result<()> {
     let g = open_game(node, label, contract_wasm).await?;
     let mut state = g.state;
-    on_status(&project(&state, &g.params));
+    on_status(&g.status);
+    // A decided game will never produce another notification, so entering the
+    // loop would block forever on a game that has already ended -- printing
+    // the final position and then hanging.
+    if g.status.is_over() {
+        return Ok(());
+    }
 
     // `open_game`'s GET deliberately does not subscribe -- the one-shot
     // commands share it and must not leave subscriptions behind. Watching is
     // the one flow that needs one, so it asks for its own.
-    node.get(ContractInstanceId::new(g.contract), true).await?;
+    //
+    // Its returned state is MERGED, not discarded. Between `open_game`'s
+    // non-subscribing GET and the subscription landing there is a window in
+    // which the opponent's move is broadcast to subscribers we are not yet
+    // among -- lost entirely, leaving a terminal on a stale position forever,
+    // indistinguishable from an idle game. This GET's answer is the freshest
+    // view available and closes that window on any transport, whatever the
+    // transport's own subscribe-ordering guarantees are.
+    let subscribed = node.get(ContractInstanceId::new(g.contract), true).await?;
+    if let Some(bytes) = subscribed.filter(|b| !b.is_empty()) {
+        let fresh = GameState::decode(&bytes)
+            .ok_or_else(|| anyhow::anyhow!("contract state did not decode as a GameState"))?;
+        let before = state.records.len();
+        state.merge(&fresh, &g.params);
+        // Report only if that actually moved us on, so the common case (the
+        // two GETs agree) does not render the same position twice.
+        if state.records.len() != before {
+            let status = project(&state, &g.params);
+            on_status(&status);
+            if status.is_over() {
+                return Ok(());
+            }
+        }
+    }
 
     loop {
+        // A real `WsClient` blocks until a notification arrives and can never
+        // return `None` (see the `NodeClient::next_update` doc), so `None`
+        // means a fake or a closed stream with nothing more to deliver.
+        // Returning is the only correct answer: `continue` here is dead code
+        // against the real transport and a yield-free hot loop against
+        // `FakeNode`, which wedges a current-thread runtime.
         let Some((id, update)) = node.next_update().await? else {
-            continue;
+            return Ok(());
         };
         // `OpenGame.contract` is a raw `[u8; 32]`; `ContractInstanceId` derefs
         // to the same, so compare through the deref rather than by type.
@@ -379,24 +449,21 @@ pub async fn watch_label<N: NodeClient>(
         // encoded `Delta`, which is `Vec<Record>` -- a DIFFERENT type with a
         // different encoding. Decoding one as the other fails silently and the
         // board simply never updates, so the two arms must not be merged.
+        //
+        // A decode failure in any arm is REPORTED, not swallowed. Dropping it
+        // leaves a board that silently never updates with no error anywhere --
+        // exactly the symptom that would follow from decoding a `Delta` as a
+        // `GameState` or vice versa, and the reason the arms are kept apart.
         match update {
             UpdateData::State(bytes) => {
-                if let Some(incoming) = GameState::decode(bytes.as_ref()) {
-                    state.merge(&incoming, &g.params);
-                }
+                state.merge(&decode_state_payload(bytes.as_ref())?, &g.params);
             }
             UpdateData::Delta(bytes) => {
-                if let Ok(delta) = ciborium::from_reader::<Delta, &[u8]>(bytes.as_ref()) {
-                    state.apply_delta(&delta, &g.params);
-                }
+                state.apply_delta(&decode_delta_payload(bytes.as_ref())?, &g.params);
             }
             UpdateData::StateAndDelta { state: s, delta } => {
-                if let Some(incoming) = GameState::decode(s.as_ref()) {
-                    state.merge(&incoming, &g.params);
-                }
-                if let Ok(delta) = ciborium::from_reader::<Delta, &[u8]>(delta.as_ref()) {
-                    state.apply_delta(&delta, &g.params);
-                }
+                state.merge(&decode_state_payload(s.as_ref())?, &g.params);
+                state.apply_delta(&decode_delta_payload(delta.as_ref())?, &g.params);
             }
             // `UpdateData` is `#[non_exhaustive]`. Ignore what we do not know.
             _ => continue,

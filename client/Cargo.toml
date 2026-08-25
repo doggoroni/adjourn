@@ -21,7 +21,6 @@ serde_bytes.workspace = true
 bs58.workspace = true
 anyhow.workspace = true
 ed25519-dalek.workspace = true
-rand.workspace = true
 shakmaty.workspace = true
 thiserror.workspace = true
 

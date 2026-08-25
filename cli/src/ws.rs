@@ -9,6 +9,7 @@ use freenet_stdlib::client_api::{
     ClientRequest, ContractRequest, ContractResponse, DelegateRequest, HostResponse, WebApi,
 };
 use freenet_stdlib::prelude::*;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// How long a single request will wait for the node's response before giving
@@ -20,6 +21,16 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct WsClient {
     api: WebApi,
     delegate_key: DelegateKey,
+    /// Update notifications that arrived while a request loop was waiting on
+    /// its own response.
+    ///
+    /// Every receive loop below has to skip messages it is not waiting for,
+    /// and one connection carries both. Dropping a notification here is not
+    /// harmless: it is the opponent's move, and the only place it is ever
+    /// delivered. `watch` would then sit on a stale position forever with no
+    /// error anywhere. So they are queued, and [`NodeClient::next_update`]
+    /// drains this before reading the socket again.
+    pending: VecDeque<(ContractInstanceId, UpdateData<'static>)>,
 }
 
 impl WsClient {
@@ -30,6 +41,7 @@ impl WsClient {
         Ok(Self {
             api: WebApi::start(stream),
             delegate_key,
+            pending: VecDeque::new(),
         })
     }
 
@@ -59,7 +71,10 @@ impl WsClient {
         loop {
             match self.recv_timeout("RegisterDelegate").await? {
                 HostResponse::Ok | HostResponse::DelegateResponse { .. } => return Ok(()),
-                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => self.pending.push_back((*key.id(), update)),
                 other => bail!("unexpected response to RegisterDelegate: {other:?}"),
             }
         }
@@ -77,7 +92,13 @@ impl NodeClient for WsClient {
                 key: id,
                 return_contract_code: false,
                 subscribe,
-                blocking_subscribe: false,
+                // When we asked to subscribe, wait for the subscription to be
+                // established before the node answers. With `false` the node
+                // replies first and the subscription lands later, leaving a
+                // window in which the opponent's move is broadcast to
+                // subscribers we are not yet among -- lost with no error, and
+                // a terminal stuck on a stale position forever.
+                blocking_subscribe: subscribe,
             }))
             .await?;
         loop {
@@ -89,8 +110,11 @@ impl NodeClient for WsClient {
                     return Ok(None)
                 }
                 // A subscribe ack or a stray notification can arrive first.
-                HostResponse::ContractResponse(ContractResponse::SubscribeResponse { .. })
-                | HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::SubscribeResponse { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => self.pending.push_back((*key.id(), update)),
                 other => bail!("unexpected response to Get: {other:?}"),
             }
         }
@@ -111,7 +135,10 @@ impl NodeClient for WsClient {
                 HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => {
                     return Ok(())
                 }
-                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => self.pending.push_back((*key.id(), update)),
                 other => bail!("unexpected response to Put: {other:?}"),
             }
         }
@@ -129,7 +156,10 @@ impl NodeClient for WsClient {
                 HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => {
                     return Ok(())
                 }
-                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => self.pending.push_back((*key.id(), update)),
                 other => bail!("unexpected response to Update: {other:?}"),
             }
         }
@@ -158,7 +188,10 @@ impl NodeClient for WsClient {
                     }
                     bail!("delegate returned no application message")
                 }
-                HostResponse::ContractResponse(ContractResponse::UpdateNotification { .. }) => {}
+                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                    key,
+                    update,
+                }) => self.pending.push_back((*key.id(), update)),
                 other => bail!("unexpected response to delegate call: {other:?}"),
             }
         }
@@ -167,6 +200,9 @@ impl NodeClient for WsClient {
     async fn next_update(
         &mut self,
     ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
+        if let Some(queued) = self.pending.pop_front() {
+            return Ok(Some(queued));
+        }
         loop {
             match self.api.recv().await? {
                 HostResponse::ContractResponse(ContractResponse::UpdateNotification {
