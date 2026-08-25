@@ -83,7 +83,7 @@ fire on their own.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 137 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 13 CLI)
+cargo test --workspace --locked     # 138 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 13 CLI)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 

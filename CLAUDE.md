@@ -450,7 +450,7 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 137 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 138 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
 9 delegate adapter tests, and 13 CLI integration tests. The algebra tests are
 the point; they run randomized partitions and delivery orders. Keep them
@@ -504,8 +504,11 @@ on the DECODED delta, which really is empty; the network reads the encoded
 length. That is the same failure that drove River's 2026-07-25 incident, where
 the room contract took 63.7% of network-wide byte-weighted broadcast work.
 
-`summarize_state` and `get_state_delta` both call `filter_valid(&params)`
-before summarizing or diffing, for the same never-settles reason.
+All three read paths — `update_state` on its base state, `summarize_state`,
+and `get_state_delta` — call `filter_valid(&params)` before merging,
+summarizing or diffing, for the same never-settles reason. Making them
+identical is the point: the same stored bytes must produce the same record set
+whichever entry point reads them.
 `validate_state` is deliberately permissive (invariant 1: rejecting content is
 forbidden, since a required-valid state lets one player destroy a game by
 signing garbage), so a peer can be handed a state that is over-K — via a

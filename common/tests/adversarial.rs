@@ -1044,36 +1044,43 @@ fn retroactive_move_substitution_forfeits() {
 /// it. Under a legality-based forfeit this converted a lost game into a
 /// recorded draw. Structurally the rewind still needs two `Move` records in one
 /// group, so it forfeits.
+///
+/// The anchor ply matters, and getting it wrong makes this test vacuous.
+/// Evicting White's ply-5 move restores the ply-4 record as the head, so the
+/// offer must be anchored THERE -- Black offering immediately after its own
+/// ply-4 move, which is also the only place an honest offer would sit. An
+/// offer anchored at ply 3 is never revived by this rewind and the test would
+/// pass whether or not the forfeit fires.
 #[test]
 fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
-    let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3"]);
-    let head_at_3 = project(&state, &params)
+    let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3", "b8c6"]);
+    let head_at_4 = project(&state, &params)
         .chain
         .last()
         .copied()
         .expect("head");
 
-    // Black offers a draw at ply 3; it is Black to answer, so the offer is live
-    // only while ply 3 is the head.
+    // Black offers a draw straight after its own ply-4 move, so it is White to
+    // answer while the offer stands. The offer is live only while ply 4 is the
+    // head.
     let offer = Record::sign(
         &b,
         &params,
         Body::DrawOffer {
-            ply: 3,
-            at: head_at_3,
+            ply: 4,
+            at: head_at_4,
         },
     );
     let mut s = state.clone();
     assert!(s.insert_verified(&offer, &params));
 
-    // Black plays on, and the offer expires.
-    let reply = make_move(&s, &params, &b, "b8c6").expect("legal");
-    assert!(s.insert_verified(&reply, &params));
+    // White declines by playing on, and the offer expires.
     let real = make_move(&s, &params, &w, "f1b5").expect("legal");
     assert!(s.insert_verified(&real, &params));
+    assert_eq!(project(&s, &params).ply, 5);
 
     // White, now wanting out, accepts the STALE offer and rewinds ply 5 so
-    // that ply 3 is the head again.
+    // that ply 4 is the head again.
     let accept = Record::sign(
         &w,
         &params,
@@ -1098,7 +1105,19 @@ fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
         !attacked.records.contains_key(&real.id()),
         "precondition: the rewind really did evict White's ply-5 move"
     );
+    assert_eq!(
+        attacked
+            .records
+            .values()
+            .filter(|r| matches!(&r.body, Body::Move { ply: 5, .. }))
+            .count(),
+        2,
+        "precondition: the rewind left two Move records in one group"
+    );
 
+    // The revival really is armed: with the head back at ply 4, the offer is
+    // live and the acceptance matches it. Only the structural forfeit outranks
+    // it -- remove `double_signed` and this fixture reports a DrawAgreement.
     let st = project(&attacked, &params);
     assert_eq!(
         st.decision.map(|d| d.reason),
