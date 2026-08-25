@@ -89,7 +89,12 @@ impl ContractInterface for Contract {
         data: Vec<UpdateData<'static>>,
     ) -> Result<UpdateModification<'static>, ContractError> {
         let params = decode_params(&parameters)?;
-        let mut game = decode_state(state.as_ref())?;
+        // Normalize the BASE state too, exactly as `summarize_state` and
+        // `get_state_delta` do. `validate_state` is permissive by design, so a
+        // peer can PUT a crafted over-K state; without this the base keeps
+        // records eviction should have dropped, and this function's output
+        // would differ from what the other two report about the same bytes.
+        let mut game = decode_state(state.as_ref())?.filter_valid(&params);
 
         for update in data {
             match update {

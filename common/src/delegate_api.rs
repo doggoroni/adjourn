@@ -139,6 +139,13 @@ pub enum Refusal {
     PlyAlreadySigned {
         ply: u16,
     },
+    /// The requested ply is past `MAX_PLY`. A record carrying it would be
+    /// refused by `Record::verify`, and signing one would permanently advance
+    /// `last_signed_ply` past every reachable ply.
+    PlyOutOfRange {
+        ply: u16,
+        max: u16,
+    },
     /// The caller is not who bound this game. With `Option` equality there is
     /// exactly one way to fail — you are not the binder — so one variant.
     WrongOrigin,
@@ -178,6 +185,10 @@ impl std::fmt::Display for Refusal {
                 f,
                 "you have already signed a different move at ply {ply}; \
                  re-send the identical move, or wait for your opponent"
+            ),
+            Refusal::PlyOutOfRange { ply, max } => write!(
+                f,
+                "ply {ply} is past the maximum of {max}; no valid record can carry it"
             ),
             Refusal::WrongOrigin => {
                 write!(f, "this game was bound by a different caller")

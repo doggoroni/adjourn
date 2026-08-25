@@ -364,6 +364,42 @@ fn an_over_k_state_comes_back_normalized_through_update() {
     assert_eq!(out.len(), 2, "the contract normalizes an over-K state to K=2");
 }
 
+/// I3: the BASE state of `update_state` must be normalized too, not just the
+/// incoming one. `summarize_state` and `get_state_delta` both normalize on
+/// read; if `update_state` did not, the same stored bytes would produce a
+/// different record set depending on which entry point read them.
+#[test]
+fn an_over_k_base_state_is_normalized_before_the_update_is_applied() {
+    let (w, _b, params) = keys();
+
+    let mut spam = GameState::empty();
+    for i in 0..30u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        spam.absorb_for_test(&Record::sign(
+            &w,
+            &params,
+            Body::Move { ply: 1, parent, uci: "e2e4".into() },
+        ));
+    }
+    assert_eq!(spam.len(), 30, "the crafted base state really is over-K");
+
+    // An empty delta changes nothing, so anything shrinking here is the base
+    // normalization and nothing else.
+    let out = update(
+        &params,
+        &spam,
+        vec![UpdateData::Delta(StateDelta::from(Vec::new()))],
+    )
+    .expect("update_state");
+
+    assert_eq!(
+        out.len(),
+        2,
+        "update_state must normalize its base state, exactly as summarize/delta do"
+    );
+}
+
 /// Finding 1: a PUT'd over-K state must not summarize or re-offer forever.
 ///
 /// `validate_state` is permissive by design (it does not check chess

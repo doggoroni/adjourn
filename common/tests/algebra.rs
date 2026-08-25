@@ -241,7 +241,7 @@ fn illegal_move_is_ignored_not_fatal() {
     let (state, params, w, b) = play(&["e2e4"]);
     let mut poisoned = state.clone();
 
-    // Black signs a structurally valid but chess-illegal move.
+    // Black signs ONE structurally valid but chess-illegal move.
     let junk = Record::sign(
         &b,
         &params,
@@ -253,23 +253,78 @@ fn illegal_move_is_ignored_not_fatal() {
     );
     assert!(poisoned.insert_verified(&junk, &params));
 
-    // State stays valid; the game simply hasn't advanced.
+    // State stays valid; the game simply hasn't advanced. Crucially it is NOT
+    // a forfeit: one record in a `(signer, Move, ply)` group is not a
+    // double-sign, however illegal it is. Invariant 1.
     assert!(poisoned.all_valid(&params));
-    assert_eq!(project(&poisoned, &params).ply, 1);
-
-    // Black can still play a real move afterwards, and it is NOT a forfeit
-    // because only one candidate is legal.
-    let real = make_move(&poisoned, &params, &b, "e7e5").unwrap();
-    poisoned.insert_verified(&real, &params);
     let st = project(&poisoned, &params);
-    assert_eq!(st.ply, 2);
-    assert_eq!(st.decision, None);
+    assert_eq!(st.ply, 1);
+    assert_eq!(st.decision, None, "one illegal move must never be fatal");
     assert_eq!(st.ignored, 1);
 
-    // White is unaffected and play continues.
-    let nxt = make_move(&poisoned, &params, &w, "g1f3").unwrap();
-    poisoned.insert_verified(&nxt, &params);
-    assert_eq!(project(&poisoned, &params).ply, 3);
+    // An inert record at a ply the chain never reaches is likewise ignored,
+    // and play continues straight past it.
+    let mut aside = state.clone();
+    let stray = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 8,
+            parent: [9u8; 32],
+            uci: "a1a8".into(),
+        },
+    );
+    assert!(aside.insert_verified(&stray, &params));
+
+    let real = make_move(&aside, &params, &b, "e7e5").unwrap();
+    aside.insert_verified(&real, &params);
+    let nxt = make_move(&aside, &params, &w, "g1f3").unwrap();
+    aside.insert_verified(&nxt, &params);
+
+    let st = project(&aside, &params);
+    assert_eq!(st.ply, 3);
+    assert_eq!(st.decision, None);
+    assert_eq!(st.ignored, 1);
+}
+
+/// The structural rule's edge, stated as its own test: a legal move and an
+/// ILLEGAL one at the same ply from the same signer is still two `Move`
+/// records in one group, and therefore still a forfeit. The rule counts
+/// records; it never looks at the position.
+#[test]
+fn a_legal_and_an_illegal_move_at_one_ply_forfeit() {
+    let (state, params, _w, b) = play(&["e2e4"]);
+    let head = project(&state, &params).chain[0];
+
+    let mut s = state.clone();
+    let junk = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 2,
+            parent: head,
+            uci: "a1a8".into(),
+        },
+    );
+    let real = Record::sign(
+        &b,
+        &params,
+        Body::Move {
+            ply: 2,
+            parent: head,
+            uci: "e7e5".into(),
+        },
+    );
+    assert!(s.insert_verified(&junk, &params));
+    assert!(s.insert_verified(&real, &params));
+
+    assert_eq!(
+        project(&s, &params).decision,
+        Some(Decision {
+            winner: Some(Color::White),
+            reason: Reason::DoubleSignForfeit
+        })
+    );
 }
 
 #[test]
@@ -446,6 +501,16 @@ fn signature_malleability_does_not_split_records() {
     loser.insert_verified(if a.sig < alt.sig { &alt } else { &a }, &params);
     assert_ne!(loser.summarize(), s1.summarize());
     assert_eq!(s1.delta_against(&loser.summarize()).len(), 1);
+
+    // And two VALID signatures over one body are ONE record in one slot, so
+    // the structural double-sign rule must not read them as a double-sign.
+    // Invariant 2 is what protects the forfeit from this false positive.
+    let st = project(&s1, &params);
+    assert_eq!(
+        st.decision, None,
+        "two signatures over one body are one record, not a double-sign"
+    );
+    assert_eq!(st.ply, 1, "and the move is played");
 
     // Sanity: the payload really is what we think it is.
     let payload = signing_payload(&params.game_id(), &body);

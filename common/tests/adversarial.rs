@@ -354,10 +354,25 @@ fn make_move_canonicalises_castling_notation() {
     );
 }
 
-/// And a hostile client that signs both spellings directly, bypassing
-/// `make_move`, must not be read as a double-sign: they are one move.
+/// Invariant 8, REOPENED and inverted -- deliberately.
+///
+/// The double-sign forfeit is now STRUCTURAL: two `Move` records from one
+/// signer at one ply forfeit, counted without ever consulting the position.
+/// That is what makes the fraud proof survive blind eviction, and it is what
+/// closes retroactive move substitution. The price is that a position-free
+/// rule cannot tell `e1g1` and `e1h1` apart: they are two bodies, two ids, two
+/// records, so signing both forfeits even though they spell ONE castling move.
+///
+/// The stock stack cannot reach this. `make_move` signs only the canonical
+/// spelling (see `make_move_canonicalises_castling_notation`), and the
+/// delegate refuses a second signature at an already-signed ply. Only a
+/// third-party client that signs raw bodies itself could do it, and it would
+/// forfeit its own user over notation.
+///
+/// The trade was taken knowingly: unlimited takeback is a game-integrity
+/// break, a self-inflicted notation forfeit in a non-stock client is not.
 #[test]
-fn two_spellings_of_one_castling_move_do_not_forfeit() {
+fn two_spellings_of_one_castling_move_now_forfeit() {
     let (state, params, w, _) = play(CASTLE_LINE);
     let head = *project(&state, &params).chain.last().unwrap();
 
@@ -377,8 +392,17 @@ fn two_spellings_of_one_castling_move_do_not_forfeit() {
     assert_eq!(s.len(), state.len() + 2, "two distinct bodies are in state");
 
     let st = project(&s, &params);
-    assert_eq!(st.decision, None, "one move must not read as a double-sign");
-    assert_eq!(st.ply, 7, "and the move should still be played");
+    assert_eq!(
+        st.decision.map(|d| d.reason),
+        Some(Reason::DoubleSignForfeit),
+        "two Move records at one ply forfeit, whatever they spell"
+    );
+    assert_eq!(
+        st.decision.and_then(|d| d.winner),
+        Some(Color::Black),
+        "the signer forfeits, so their opponent wins"
+    );
+    assert_eq!(st.ply, 6, "the chain stops one ply short of the fraud");
 }
 
 #[test]
@@ -679,12 +703,16 @@ fn flooding_draw_offers_cannot_evict_a_move_at_the_same_ply() {
     );
 }
 
-/// The trade this design accepts, made executable so it cannot silently get
-/// worse. Eviction must sort blind by id -- legality depends on the chain --
-/// so a cheater can bury a double-sign under lower-id illegal records. The
-/// forfeit is lost, but the result is a STALL, never a stolen win.
+/// Burial no longer works.
+///
+/// Eviction must sort blind by id, so a cheater CAN still evict both halves of
+/// a legality-based fraud proof under lower-id junk. What they cannot do is
+/// leave the group clean: eviction FLOORS `(signer, Move, ply)` at K=2 rather
+/// than emptying it, so whatever survives is still two `Move` records at one
+/// ply -- which is the structural forfeit. The junk used to hide the fraud is
+/// itself the fraud proof.
 #[test]
-fn a_buried_double_sign_stalls_instead_of_forfeiting() {
+fn a_buried_double_sign_still_forfeits() {
     let (state, params, w, _b) = play(&["e2e4", "e7e5"]);
     let head = project(&state, &params).chain.last().copied().expect("head");
 
@@ -698,12 +726,12 @@ fn a_buried_double_sign_stalls_instead_of_forfeiting() {
     assert_eq!(
         caught.decision.map(|d| d.reason),
         Some(Reason::DoubleSignForfeit),
-        "unburied, a double-sign still forfeits"
+        "unburied, a double-sign forfeits"
     );
 
     // Now bury both under lower-id records in the same group.
     let mut buried = state.clone();
-    let mut junk: Vec<Record> = vec![a, b];
+    let mut junk: Vec<Record> = vec![a.clone(), b.clone()];
     for i in 0..64u64 {
         let mut parent = [0u8; 32];
         parent[..8].copy_from_slice(&i.to_le_bytes());
@@ -711,9 +739,249 @@ fn a_buried_double_sign_stalls_instead_of_forfeiting() {
     }
     buried.merge(&raw_state(&junk), &params);
 
-    let stalled = project(&buried, &params);
-    assert_eq!(stalled.decision, None, "the forfeit is evaded: no decision");
-    assert_eq!(stalled.ply, 2, "and the chain stalls one ply short");
+    assert!(
+        !buried.records.contains_key(&a.id()) || !buried.records.contains_key(&b.id()),
+        "precondition: burial really did evict at least one half of the fraud"
+    );
+    assert_eq!(
+        buried
+            .records
+            .values()
+            .filter(|r| matches!(&r.body, Body::Move { ply: 3, .. }) && r.signer == a.signer)
+            .count(),
+        2,
+        "eviction floors the group at K=2 -- it never empties it"
+    );
+
+    let st = project(&buried, &params);
+    assert_eq!(
+        st.decision.map(|d| d.reason),
+        Some(Reason::DoubleSignForfeit),
+        "buried, it STILL forfeits: the rule counts records, not legality"
+    );
+    assert_eq!(
+        st.decision.and_then(|d| d.winner),
+        Some(Color::Black),
+        "the burier forfeits, not their opponent"
+    );
+    assert_eq!(st.ply, 2, "the chain stops one ply short of the fraud");
+}
+
+/// Two `Move` records at one ply forfeit even when NEITHER is a legal
+/// continuation, and even at a ply the chain never reaches. The rule is a
+/// property of the record set, not of any position.
+#[test]
+fn two_move_records_at_one_ply_forfeit_regardless_of_legality() {
+    let (state, params, _w, b) = play(&["e2e4"]);
+
+    let mut s = state.clone();
+    for uci in ["a1a8", "h8h1"] {
+        // Both illegal, both wrong-parent, at a ply the chain cannot reach.
+        let rec = Record::sign(
+            &b,
+            &params,
+            Body::Move {
+                ply: 40,
+                parent: [3u8; 32],
+                uci: uci.into(),
+            },
+        );
+        assert!(s.insert_verified(&rec, &params));
+    }
+
+    let st = project(&s, &params);
+    assert_eq!(
+        st.decision,
+        Some(Decision {
+            winner: Some(Color::White),
+            reason: Reason::DoubleSignForfeit
+        }),
+        "two Move records in one group forfeit, position-free"
+    );
+}
+
+/// Both players double-signing has no principled winner, so it is a draw --
+/// exactly as for mutual resignation. Deterministic either way, which is all
+/// convergence requires.
+#[test]
+fn a_mutual_double_sign_is_a_draw() {
+    let (state, params, w, b) = play(&["e2e4"]);
+
+    let mut s = state.clone();
+    for (key, ply) in [(&w, 41u16), (&b, 40u16)] {
+        for uci in ["a1a8", "h8h1"] {
+            let rec = Record::sign(
+                key,
+                &params,
+                Body::Move {
+                    ply,
+                    parent: [3u8; 32],
+                    uci: uci.into(),
+                },
+            );
+            assert!(s.insert_verified(&rec, &params));
+        }
+    }
+
+    assert_eq!(
+        project(&s, &params).decision,
+        Some(Decision {
+            winner: None,
+            reason: Reason::DoubleSignForfeit
+        })
+    );
+}
+
+/// Grind `parent` until the record's id sorts below `below`.
+fn junk_below(
+    key: &SigningKey,
+    params: &GameParams,
+    ply: u16,
+    uci: &str,
+    below: RecordId,
+) -> Option<Record> {
+    for i in 0..200_000u64 {
+        let mut parent = [0u8; 32];
+        parent[..8].copy_from_slice(&i.to_le_bytes());
+        let rec = Record::sign(
+            key,
+            params,
+            Body::Move {
+                ply,
+                parent,
+                uci: uci.into(),
+            },
+        );
+        if rec.id() < below {
+            return Some(rec);
+        }
+    }
+    None
+}
+
+/// THE ATTACK the structural forfeit exists to close: retroactive move
+/// substitution.
+///
+/// White plays a real move, sees Black's reply, then publishes TWO lower-id
+/// records at its own ply -- one junk record with a wrong parent (never a walk
+/// candidate) and one genuinely different LEGAL move. Eviction drops the real
+/// move, the parent check filters the junk, and under a legality-based rule
+/// exactly one candidate survives: the walk continues on the substitute, and
+/// White has taken its move back using Black as a search oracle.
+///
+/// Structurally it is two `Move` records in one group. Forfeit.
+#[test]
+fn retroactive_move_substitution_forfeits() {
+    let (state, params, w, _b) = play(&["e2e4", "e7e5", "g1f3", "b8c6"]);
+    let before = project(&state, &params);
+    assert_eq!(before.ply, 4);
+    let head = before.chain.last().copied().expect("head");
+
+    // The real ply-5 move, published and answered.
+    let real = make_move(&state, &params, &w, "f1b5").expect("Bb5 is legal");
+    let mut s = state.clone();
+    assert!(s.insert_verified(&real, &params));
+    assert_eq!(project(&s, &params).ply, 5, "the real move is on the chain");
+
+    // A different LEGAL ply-5 move whose id sorts below the real one.
+    let alt = ["h2h3", "a2a3", "d2d3", "b1c3", "f3g5", "f1c4", "f1e2", "f1d3"]
+        .iter()
+        .map(|uci| {
+            Record::sign(
+                &w,
+                &params,
+                Body::Move {
+                    ply: 5,
+                    parent: head,
+                    uci: (*uci).into(),
+                },
+            )
+        })
+        .find(|rec| rec.id() < real.id())
+        .expect("some legal alternative sorts below the real move");
+
+    // ...and a wrong-parent junk record, also below it, to fill the group.
+    let junk = junk_below(&w, &params, 5, "e2e4", real.id().min(alt.id()))
+        .expect("a wrong-parent record below both");
+
+    let mut attacked = s.clone();
+    attacked.merge(&raw_state(&[alt.clone(), junk.clone()]), &params);
+
+    assert!(
+        !attacked.records.contains_key(&real.id()),
+        "precondition: the real move really was evicted"
+    );
+    assert!(attacked.records.contains_key(&alt.id()));
+    assert!(attacked.records.contains_key(&junk.id()));
+
+    let st = project(&attacked, &params);
+    assert_eq!(
+        st.decision.map(|d| d.reason),
+        Some(Reason::DoubleSignForfeit),
+        "the substitution is a double-sign, and is caught structurally"
+    );
+    assert_eq!(
+        st.decision.and_then(|d| d.winner),
+        Some(Color::Black),
+        "the substituting player loses, rather than getting a free takeback"
+    );
+    assert_eq!(st.ply, 4, "the chain stops before the rewritten ply");
+    assert_eq!(st.fen, before.fen, "and the board is the last agreed position");
+}
+
+/// The same rewind, aimed at a draw record instead of the board: pull the head
+/// back to a position where an opponent's `DrawOffer` was still live, then cash
+/// it. Under a legality-based forfeit this converted a lost game into a
+/// recorded draw. Structurally the rewind still needs two `Move` records in one
+/// group, so it forfeits.
+#[test]
+fn reviving_an_expired_draw_offer_by_rewinding_forfeits() {
+    let (state, params, w, b) = play(&["e2e4", "e7e5", "g1f3"]);
+    let head_at_3 = project(&state, &params).chain.last().copied().expect("head");
+
+    // Black offers a draw at ply 3; it is Black to answer, so the offer is live
+    // only while ply 3 is the head.
+    let offer = Record::sign(&b, &params, Body::DrawOffer { ply: 3, at: head_at_3 });
+    let mut s = state.clone();
+    assert!(s.insert_verified(&offer, &params));
+
+    // Black plays on, and the offer expires.
+    let reply = make_move(&s, &params, &b, "b8c6").expect("legal");
+    assert!(s.insert_verified(&reply, &params));
+    let real = make_move(&s, &params, &w, "f1b5").expect("legal");
+    assert!(s.insert_verified(&real, &params));
+
+    // White, now wanting out, accepts the STALE offer and rewinds ply 5 so
+    // that ply 3 is the head again.
+    let accept = Record::sign(&w, &params, Body::DrawAccept { ply: 5, offer: offer.id() });
+    assert!(s.insert_verified(&accept, &params));
+    assert_eq!(
+        project(&s, &params).decision,
+        None,
+        "precondition: the stale offer alone does nothing"
+    );
+
+    let junk_a = junk_below(&w, &params, 5, "e2e4", real.id()).expect("junk below");
+    let junk_b = junk_below(&w, &params, 5, "d2d4", real.id().min(junk_a.id()))
+        .expect("second junk below");
+    let mut attacked = s.clone();
+    attacked.merge(&raw_state(&[junk_a, junk_b]), &params);
+    assert!(
+        !attacked.records.contains_key(&real.id()),
+        "precondition: the rewind really did evict White's ply-5 move"
+    );
+
+    let st = project(&attacked, &params);
+    assert_eq!(
+        st.decision.map(|d| d.reason),
+        Some(Reason::DoubleSignForfeit),
+        "the rewind forfeits instead of cashing the expired offer"
+    );
+    assert_eq!(
+        st.decision.and_then(|d| d.winner),
+        Some(Color::Black),
+        "and it is the rewinder who loses"
+    );
 }
 
 // ---------------------------------------------------------------------------

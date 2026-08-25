@@ -199,10 +199,15 @@ impl GameState {
     /// Eviction sorts blind, by id. It CANNOT consider chess legality: legality
     /// is a function of the position, which is a function of the chain, which is
     /// a function of which records are present -- so a legality-aware rule would
-    /// evict different records in a partial state and peers would diverge. The
-    /// cost of sorting blind is that a cheater can bury a double-sign under
-    /// lower-id illegal records; see the spec, and
-    /// `a_buried_double_sign_stalls_instead_of_forfeiting`.
+    /// evict different records in a partial state and peers would diverge.
+    ///
+    /// Sorting blind means a cheater can bury a *legality-based* fraud proof
+    /// under lower-id junk. That is why the double-sign proof is structural
+    /// instead (`project::double_signed`): it counts `Move` records per
+    /// `(signer, ply)`, and K=2 FLOORS this group rather than emptying it, so
+    /// burial cannot dissolve the proof -- the junk used to bury it is itself
+    /// two records in one group. This is what makes K=2 load-bearing.
+    /// Test: `a_buried_double_sign_still_forfeits`.
     pub fn evict(&mut self) {
         // BTreeMap iterates in id order, so each group's ids arrive ascending
         // and the first K are the K smallest.

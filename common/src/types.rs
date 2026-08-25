@@ -48,9 +48,11 @@ impl Kind {
     /// How many records one signer may hold in one `(signer, kind, ply)` group.
     pub fn k(self) -> usize {
         match self {
-            // Both halves of a double-sign, so the fraud proof survives an
-            // honest merge. See the spec on why this is not proof against a
-            // determined self-spammer.
+            // Two, so the structural double-sign proof survives eviction.
+            // This is the load-bearing choice, not a decorative one: a group
+            // of two is FLOORED at two rather than emptied, so a cheater
+            // cannot spam their own group down to a single clean record and
+            // erase the evidence. See `project::double_signed`.
             Kind::Move => 2,
             // At a given ply there is exactly one head, so exactly one
             // legitimate `at`. K=1 costs an honest player nothing.

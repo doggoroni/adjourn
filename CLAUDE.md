@@ -54,7 +54,10 @@ These look like bugs. They are not.
    players. Illegal moves are *ignored at projection*. If illegality made the
    whole state invalid, either player could permanently destroy a game by
    signing one garbage move — every honest peer would reject the entire state.
-   Test: `illegal_move_is_ignored_not_fatal`.
+   ONE illegal move is ignored; only *two or more* `Move` records at one ply
+   are fatal, and that rule (invariant 11) counts records without ever asking
+   whether any of them is legal. Tests: `illegal_move_is_ignored_not_fatal`,
+   `a_legal_and_an_illegal_move_at_one_ply_forfeit`.
 
 2. **`Record::id()` must NOT cover the signature.**
    Id is `H(signer ‖ body)`. If the id covered the sig, the same statement
@@ -105,14 +108,26 @@ These look like bugs. They are not.
    player draw their way out of a loss. Tests: `a_claim_does_not_disturb_a_checkmate`,
    `a_valid_claim_outranks_a_pending_draw_agreement`.
 
-8. **One move has exactly one spelling.**
+8. **One move has exactly one spelling — and signing two now forfeits.**
    shakmaty accepts both `e1g1` and `e1h1` for the same castling move. Two
-   spellings are two bodies with two ids for one move, which `walk` would read
-   as a double-sign and forfeit an honest player over a notation mismatch.
-   `make_move` signs the canonical form, and `walk` collapses candidates by the
-   move they resolve to before counting. Tests:
+   spellings are two bodies with two ids for one move.
+
+   This invariant used to promise that such a pair was *not* read as a
+   double-sign: `walk` collapsed candidates by the move they resolved to
+   before counting. Invariant 11 reopened it deliberately. The double-sign
+   forfeit is now structural — it counts `Move` records per `(signer, ply)`
+   and never consults the position — and a position-free rule cannot tell
+   two spellings of one castling move apart. So signing both forfeits, and
+   `walk`'s collapse logic is gone (it had become unreachable).
+
+   The obligation therefore moves entirely onto the writers, and the stock
+   stack discharges it twice over: `make_move` signs only the canonical
+   spelling, and the delegate refuses a second signature at an already-signed
+   ply. Only a third-party client signing raw bodies could produce both, and
+   it would forfeit its own user over notation. That was the accepted price
+   of closing retroactive move substitution. Tests:
    `make_move_canonicalises_castling_notation`,
-   `two_spellings_of_one_castling_move_do_not_forfeit`.
+   `two_spellings_of_one_castling_move_now_forfeit`.
 
 9. **Draw offers are bound to the head.**
    An agreement counts only while `DrawOffer.at` is still the head of the
@@ -134,6 +149,42 @@ These look like bugs. They are not.
     opponent: your records only ever compete with your own. Tests:
     `flooding_draw_offers_cannot_evict_a_move_at_the_same_ply`,
     `a_spammer_cannot_evict_the_opponents_records`.
+
+11. **The double-sign forfeit is STRUCTURAL, not legality-based.**
+    A signer holding two or more `Move` records at one ply forfeits. The rule
+    counts records over `(signer, ply)`; it never consults chess legality, the
+    chain, or arrival order. It fires at any ply, including plies the chain
+    never reaches, and the walk then stops one ply short of the earliest such
+    ply. Both players double-signing is a draw, as for mutual resignation.
+
+    Position-free is not a simplification, it is the whole point. Eviction has
+    to sort blind by id (legality depends on the position, which depends on the
+    chain, which depends on which records are present — so a legality-aware
+    rule evicts differently in a partial state and peers diverge). A
+    legality-based forfeit is therefore *dissolvable*: publish a wrong-parent
+    junk record and one different legal move, both lower-id than your real
+    move, and eviction drops your real move while the parent check filters the
+    junk. Exactly one legal candidate survives, no forfeit fires, and you have
+    rewritten a ply your opponent already answered — unlimited takeback using
+    the opponent as a search oracle. The same rewind revives an expired
+    `DrawOffer` or `DrawClaim`, because every head you can rewind to is one
+    where you were to move.
+
+    Counting records cannot be dissolved that way: every one of these attacks
+    needs two `Move` records in the attacker's own group, and eviction FLOORS
+    that group at K=2 rather than emptying it. That is what makes K=2
+    load-bearing rather than decorative — the junk used to hide the fraud *is*
+    the fraud proof.
+
+    Signature malleability does not trip it: two valid signatures over one body
+    share an id (invariant 2), so they are one record in one slot. Two
+    spellings of one castling move DO trip it — see invariant 8. Tests:
+    `two_move_records_at_one_ply_forfeit_regardless_of_legality`,
+    `retroactive_move_substitution_forfeits`,
+    `reviving_an_expired_draw_offer_by_rewinding_forfeits`,
+    `a_buried_double_sign_still_forfeits`, `a_mutual_double_sign_is_a_draw`,
+    `illegal_move_is_ignored_not_fatal`,
+    `signature_malleability_does_not_split_records`.
 
 ## Persisted-record versioning
 
@@ -212,40 +263,50 @@ pure function of the result set.
   safe: chain length is shorter in a partial state, so a peer would evict
   records the merged state needs.
 
-- **Eviction gives any player an unconditional way to void a game.** Eviction
-  must sort blind by id: legality depends on the position, which depends on
-  the chain, which depends on which records are present, so a legality-aware
-  rule would evict different records in a partial state and peers would
-  diverge. But blind-by-id cuts both ways. A player who has already played a
-  ply can sign two lower-id junk `Move` records at that same ply — no
-  cheating required, no double-sign involved — and their own real move falls
-  out of the top-K. The chain stops one ply short and the game ends with no
-  result. This is not a narrow loophole for a cheater dodging a forfeit; it is
-  available to either player, at any ply, at will, and no value of K prevents
-  it — the only rule that would is legality-aware, which is exactly the
-  divergence trap above.
+- **Eviction sorts blind, and that is survivable only because the forfeit is
+  structural.** Eviction must sort blind by id: legality depends on the
+  position, which depends on the chain, which depends on which records are
+  present, so a legality-aware rule would evict different records in a partial
+  state and peers would diverge.
 
-  The double-sign forfeit inherits the same hole: bury the second signature
-  under lower-id illegal records at that ply and `walk` finds no forfeit
-  candidate either, just a stalled chain.
+  Blind-by-id means a player CAN evict their own real move by signing lower-id
+  junk `Move` records at that ply, and can bury a *legality-based* fraud proof
+  the same way. Both were, for one commit on this branch, an unconditional
+  burn-the-game button and worse: leave exactly one valid candidate standing
+  and the chain continues on a substituted move.
 
-  The trade is accepted because nothing new is gained by it: the outcome is a
-  stalled game with no decision, which is what walking away already produces.
-  No win is ever stolen — at worst a loss becomes a no-result. A
-  witness-published fraud proof embedding both offending records would close
-  the double-sign case, but defining fraud without reference to a position
-  collides with invariant 8's castling case. Test:
-  `a_buried_double_sign_stalls_instead_of_forfeiting`.
+  Invariant 11 closes it. The forfeit counts `Move` records per `(signer,
+  ply)`, so every version of this manoeuvre — voiding your own game,
+  substituting a move, rewinding the head to revive an expired draw offer —
+  requires two records in your own group and forfeits you. The fraud proof is
+  RESTORED, and is strictly stronger than the original, because it no longer
+  depends on chess legality and so cannot be dissolved by burial. K=2 is what
+  makes it robust: eviction floors the group rather than emptying it, so an
+  attacker cannot evict away their own evidence. The cost is invariant 8's
+  castling case, which the stock stack cannot reach. Tests:
+  `a_buried_double_sign_still_forfeits`,
+  `retroactive_move_substitution_forfeits`,
+  `reviving_an_expired_draw_offer_by_rewinding_forfeits`.
 
-- **The outcome is not monotone.** A strict superset can move the projection
-  *down*: a decided game plus one extra record (a late-published double-sign
-  fraud proof) becomes a forfeit at the fork point, with `fen` and `ply` rewound
-  and the opposite winner. Peers holding the same set still agree, so this is
-  not a convergence bug, and it is not exploitable — double-signing only ever
-  forfeits the signer. But a withheld fraud proof can reverse a displayed
-  result long after the fact. The UI should show the full chain rather than the
+- **The outcome is not monotone, and eviction is the bigger source.** A
+  strict superset can move the projection *down*: a decided game plus one extra
+  record (a late-published double-sign fraud proof) becomes a forfeit at the
+  fork point, with `fen` and `ply` rewound and the opposite winner. Peers
+  holding the same set still agree, so this is not a convergence bug, and it is
+  not exploitable — double-signing only ever forfeits the signer.
+
+  Eviction widens this considerably, and is now the dominant source. Adding
+  records does not merely ADD to the set; it can REMOVE from it, because a
+  lower-id record displaces a higher-id one in the same `(signer, kind, ply)`
+  group. So a superset can rewind the head, unseat the move the chain was
+  built on, and change `fen`, `ply`, `chain`, `ignored` and the decision all at
+  once — and it can do so at a ply far behind the visible head. Every such
+  rewind now lands on invariant 11's forfeit rather than on a silent
+  substitution, so the *direction* is safe (the rewinder loses), but the
+  display still moves. The UI should show the full chain rather than the
   truncated `fen` after a forfeit.
-  Test: `superset_reverses_the_outcome_and_rewinds_the_board`.
+  Tests: `superset_reverses_the_outcome_and_rewinds_the_board`,
+  `retroactive_move_substitution_forfeits`.
 
 - **Threefold and fifty-move are claims, and `DrawClaim` is how they are
   made.** FIDE makes these a *claim* (9.2, 9.3), not an automatic result.
@@ -389,24 +450,25 @@ machine-specific paths and produces a different, unshippable key.
 
 ## Testing
 
-`cargo test --workspace --locked` — 131 tests: 93 in `adjourn-core` (23 algebra
-tests, 31 adversarial tests, and 39 delegate-policy tests), 16 contract tests,
+`cargo test --workspace --locked` — 137 tests: 99 in `adjourn-core` (24 algebra
+tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
 9 delegate adapter tests, and 13 CLI integration tests. The algebra tests are
 the point; they run randomized partitions and delivery orders. Keep them
 green. New state-shape features need a corresponding law test, not just a
 happy-path test.
 
-- `common/tests/algebra.rs` (23) — the monoid laws and the original
+- `common/tests/algebra.rs` (24) — the monoid laws and the original
   adversarial cases.
-- `common/tests/adversarial.rs` (31) — convergence attacks, outcome
-  precedence, and the chess edges (promotion, underpromotion, castling
-  notation, en passant, repetition, top-K eviction, `MAX_PLY`, and draw
-  claims).
-- `common/tests/delegate_policy.rs` (39) — the delegate's pure decision
+- `common/tests/adversarial.rs` (35) — convergence attacks, outcome
+  precedence, the structural double-sign forfeit and the two attacks it closes
+  (retroactive move substitution, reviving an expired draw offer by rewinding),
+  and the chess edges (promotion, underpromotion, castling notation, en
+  passant, repetition, top-K eviction, `MAX_PLY`, and draw claims).
+- `common/tests/delegate_policy.rs` (40) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
   ply-0 sentinel guard, and wire round-trips for `Request`/`Response`/
   `GameRecord`/`GameSummary` through CBOR. Runs on any platform.
-- `contracts/adjourn-contract/tests/interface.rs` (16) — the adapter: byte
+- `contracts/adjourn-contract/tests/interface.rs` (17) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
 - `delegates/adjourn-delegate/tests/adapter.rs` (9) — CI-only. Two groups:
@@ -457,8 +519,19 @@ are "the decoded value looks fine; the peer never converges because of what
 actually got compared or sent."
 
 Feed it partial and adversarial states, not just happy games -- the merge laws
-only bite when peers hold different fragments. Current status: 348 cases, 348
-held, 0 violations.
+only bite when peers hold different fragments.
+
+**Status: STALE, needs a re-run.** The last recorded result — 348 cases, 348
+held, 0 violations — was taken BEFORE the `algebra` branch. That branch rotated
+the wire format (`Body::DrawClaim`, the `ply` field on the draw bodies), so
+those corpus states no longer decode as the states they were recorded as, and
+the contract key rotated with them. Nothing in that corpus exercises top-K
+eviction, `MAX_PLY`, draw claims, or the structural double-sign forfeit either.
+Treat the number as history, not as a current claim: rebuild the corpus against
+this branch's contract and re-run before shipping. The corpus should include
+over-K states (which `validate_state` accepts and the three read paths
+normalize), states holding two `Move` records in one group, and partial states
+split so that each peer holds a different half of an eviction group.
 
 The `hazmat` dev-dependency on ed25519-dalek exists so the tests can forge a
 *second valid* signature over one body — the case invariant 4 is about. It is a

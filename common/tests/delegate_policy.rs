@@ -3,7 +3,7 @@ use adjourn_core::delegate_policy::{
     classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
     HostEntropy, SignDecision, GAME_RECORD_FORMAT,
 };
-use adjourn_core::{Body, GameParams};
+use adjourn_core::{Body, GameParams, MAX_PLY};
 use ed25519_dalek::SigningKey;
 
 #[test]
@@ -505,6 +505,35 @@ fn resign_and_draw_bodies_sign_without_touching_the_ply_counter() {
         assert_eq!(after.last_signed_ply, record.last_signed_ply);
         assert_eq!(after.last_move_body_hash, record.last_move_body_hash);
     }
+}
+
+/// A ply past `MAX_PLY` can never appear in a record that `Record::verify`
+/// accepts, so signing one produces an unusable signature -- and worse,
+/// permanently advances `last_signed_ply` past every ply the game can still
+/// legitimately reach, locking the key out of its own game.
+#[test]
+fn a_move_past_max_ply_is_refused() {
+    // MAX_PLY is even, so MAX_PLY + 1 is White's ply: `WrongSide` cannot be
+    // what refuses it.
+    let past = MAX_PLY + 1;
+    assert!(matches!(
+        decide_sign(&white_record(), &mv(past, "e2e4"), Some(ORIGIN)),
+        SignDecision::Refuse(Refusal::PlyOutOfRange { ply, max })
+            if ply == past && max == MAX_PLY
+    ));
+
+    // The cap itself is still signable, and the refusal does not touch the
+    // counter on the way past.
+    assert!(matches!(
+        decide_sign(&black_record(), &mv(MAX_PLY, "e7e5"), Some(ORIGIN)),
+        SignDecision::Sign { .. }
+    ));
+    let record = white_record();
+    assert!(matches!(
+        decide_sign(&record, &mv(past, "e2e4"), Some(ORIGIN)),
+        SignDecision::Refuse(_)
+    ));
+    assert_eq!(record.last_signed_ply, 0, "a refusal never advances the ply");
 }
 
 #[test]

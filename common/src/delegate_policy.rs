@@ -5,7 +5,7 @@
 //! itself cannot even be compiled on a Windows host.
 
 use crate::delegate_api::{EntropyQuality, Refusal, Side};
-use crate::types::{color_at_ply, Body, GameParams, KeyBytes};
+use crate::types::{color_at_ply, Body, GameParams, KeyBytes, MAX_PLY};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -239,6 +239,16 @@ pub fn decide_sign(record: &GameRecord, body: &Body, origin: Option<[u8; 32]>) -
 
     match body {
         Body::Move { ply, .. } => {
+            // Before the ply counter is touched: no record past the cap can
+            // ever verify, so signing one produces an unusable signature AND
+            // permanently advances `last_signed_ply` past every ply the game
+            // can still legitimately reach.
+            if *ply > MAX_PLY {
+                return SignDecision::Refuse(Refusal::PlyOutOfRange {
+                    ply: *ply,
+                    max: MAX_PLY,
+                });
+            }
             let needs: Side = color_at_ply(*ply).into();
             if needs != record.side {
                 return SignDecision::Refuse(Refusal::WrongSide {
