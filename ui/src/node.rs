@@ -597,6 +597,22 @@ mod browser {
             .map_err(|e| anyhow!("crypto.getRandomValues failed: {e:?}"))?;
         Ok(bytes)
     }
+
+    /// 16 bytes from the browser's CSPRNG, for an invite's nonce.
+    ///
+    /// The nonce distinguishes repeat matchups between the same two players and
+    /// has exactly one author, the inviter — that is what stops the two sides
+    /// deriving different `GameParams`.
+    pub fn browser_nonce() -> anyhow::Result<[u8; 16]> {
+        let mut bytes = [0u8; 16];
+        web_sys::window()
+            .ok_or_else(|| anyhow!("no window"))?
+            .crypto()
+            .map_err(|e| anyhow!("no crypto: {e:?}"))?
+            .get_random_values_with_u8_array(&mut bytes)
+            .map_err(|e| anyhow!("crypto.getRandomValues failed: {e:?}"))?;
+        Ok(bytes)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
