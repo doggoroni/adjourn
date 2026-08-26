@@ -1,10 +1,12 @@
 //! The adjourn web UI.
 //!
-//! Currently a bring-up page: it renders the opening position from a projected
-//! `GameState` and lets you select a piece to see its legal targets. There is
-//! no node connection and no signing here yet — the point is to prove the
-//! toolchain end to end, since nothing in this crate had ever been loaded in a
-//! browser. The five real screens land with the views work.
+//! Currently a bring-up page. It renders the opening position from a projected
+//! `GameState` with click-to-select legal targets, and offers a one-button
+//! probe that connects to a local node, registers the delegate and lists
+//! games. No signing and no game flow yet — the point is to prove the
+//! toolchain and the transport end to end, since nothing in this crate had
+//! ever been loaded in a browser and `BrowserClient` had never talked to
+//! anything. The five real screens land with the views work.
 //!
 //! Referencing `adjourn_ui` at all is load-bearing: until this file used the
 //! library, the binary did not link it, so `dx build` emitted a bundle
@@ -14,6 +16,12 @@ use adjourn_core::{project, GameParams, GameState, Status};
 use adjourn_ui::board::{squares, Marker, Shade, Square};
 use dioxus::prelude::*;
 use shakmaty::{Color, Role};
+
+/// The node's WebSocket API, matching the CLI's default.
+///
+/// Loopback-only by design: `CLAUDE.md` records that the real boundary for a
+/// CLI-bound game is that this API is not reachable off the machine.
+const NODE_URL: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
 
 fn main() {
     dioxus::launch(App);
@@ -82,12 +90,16 @@ fn App() -> Element {
     // projection uses.
     let mut selected = use_signal(|| None::<(char, u8)>);
 
+    // The live-node probe's output, and whether one is in flight.
+    let mut lines = use_signal(Vec::<String>::new);
+    let mut probing = use_signal(|| false);
+
     let board: Vec<Square> = squares(&status, Color::White, selected());
 
     rsx! {
         main { class: "app",
             h1 { "adjourn" }
-            p { class: "sub", "untimed correspondence chess — bring-up page, no node attached" }
+            p { class: "sub", "untimed correspondence chess — bring-up page" }
 
             div { class: "board",
                 for sq in board.iter().copied() {
@@ -127,6 +139,31 @@ fn App() -> Element {
             // contract and registering the delegate; until then this fold is
             // what makes the embedding true rather than nominal.
             p { class: "status", "{embedded_summary()}" }
+
+            hr {}
+            h2 { "node" }
+            button {
+                id: "connect",
+                disabled: probing(),
+                onclick: move |_| {
+                    probing.set(true);
+                    spawn(async move {
+                        let result = adjourn_ui::live::probe(NODE_URL).await;
+                        lines.set(match result {
+                            Ok(ok) => ok,
+                            // Show the failure rather than a spinner. Every
+                            // Critical this transport has had presented as a
+                            // hang, so a visible error is the point.
+                            Err(e) => vec![format!("FAILED — {e}")],
+                        });
+                        probing.set(false);
+                    });
+                },
+                if probing() { "connecting…" } else { "connect, register the delegate, list games" }
+            }
+            pre { id: "probe", class: "probe",
+                if lines().is_empty() { "not attempted" } else { "{lines().join(\"\\n\")}" }
+            }
         }
     }
 }

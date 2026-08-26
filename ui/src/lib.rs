@@ -7,6 +7,8 @@
 //! browser and no framework.
 
 pub mod board;
+/// The live-node probe used by the bring-up page.
+pub mod live;
 pub mod node;
 
 /// The compiled contract, embedded because a browser cannot read it off disk.
