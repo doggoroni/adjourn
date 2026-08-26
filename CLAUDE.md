@@ -478,8 +478,10 @@ socket's `recv()` and has no such log to exhaust, so for a real node this call
 either yields an update or does not return — it can never produce `None`.
 `BrowserClient` is the exception that makes the contract real: its error
 handler pushes a `Frame::Closed` on `onerror`/`onclose`, so `next_update` there
-returns `Ok(None)` to mean "the socket is gone, no update will ever arrive".
-See "UI" below.
+returns `Ok(None)` to mean "the socket is gone, no update will ever arrive" —
+and it returns it on the *latched* close as well as on the frame, because the
+frame itself is one queue item that an in-flight request may already have
+eaten. See "UI" below.
 
 `watch` has no automated test against a real node.
 `client/tests/updates.rs::watch_label_reports_the_opponents_move` drives
@@ -625,11 +627,17 @@ caught with `cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e
 normal`, not assumed: the contract and delegate showed up in the graph until
 `ui/Cargo.toml` was changed to a direct `path` dependency
 (`adjourn-client = { path = "../client", default-features = false }`), which
-cargo does honor. `-e normal` is not decoration. Dev-dependencies resolve with
-default features regardless, so a single `adjourn-client` dev-dep in
-`ui/Cargo.toml` puts `fake` — and the contract and delegate — back into the
-printed graph, and the check can no longer tell the guarded state from the
-broken one. There is deliberately no such dev-dep (an integration test already
+cargo does honor. `-e normal` is not decoration, and it earns its place the
+opposite way round from the obvious guess — this was measured. `-e normal`
+prints only the graph that actually **ships**, so it is immune to
+dev-dependencies: restoring an `adjourn-client` dev-dep gives **0** hits,
+because the dev edge is dropped outright. The *plain* `cargo tree` is the
+misleading one — a dev-dep resolves with default features, turning `fake` back
+on, so it prints the contract and the delegate even when the shipping graph is
+clean. What `-e normal` does catch is the regression that matters: reverting
+`ui/Cargo.toml` to `workspace = true, default-features = false` puts both
+crates in the graph (measured, 2 hits), and the path form clears it. There is
+deliberately no `adjourn-client` dev-dep anyway (an integration test already
 sees the package's normal dependencies), and CI's "Assert the UI graph excludes
 the contract and the delegate" step runs this same command so a revert cannot
 pass unnoticed. Every other crate in this workspace depends on its siblings
@@ -687,8 +695,34 @@ inbox cannot signal the death by ending, because `freenet-stdlib` `forget()`s
 its onmessage closure (`client_api/browser.rs` ~125) — the sender is leaked,
 so `inbox.next()` never returns `None` and any "connection closed" arm written
 against it is unreachable dead code. So the handler does two jobs: resolve
-`connect` at most once, and *always* push a `Frame::Closed` into the same
-inbox the responses arrive on.
+`connect` at most once, and *always* push a frame into the same inbox the
+responses arrive on.
+
+**But not every call of that handler is a dead socket, and the ones that are
+must be latched.** Two corrections to the paragraph above, each of which was a
+live bug in the first version of it.
+
+`freenet-stdlib` funnels far more than socket death through the single error
+handler: a non-binary frame, a bincode deserialize failure, two stream
+reassembly failures, and four send-side paths all call it, alongside the
+genuine `onerror` and `onclose` (`browser.rs` ~55, ~69, ~100, ~112, ~187,
+~204, ~238, ~242 versus ~128 and ~152). Synthesising `Closed` for all of them
+means **one undeserialisable frame ends `watch` on a live socket, silently** —
+precisely what `watch` exists to prevent. `socket_is_gone` draws the line on
+the `source` tag the stdlib puts in its JSON payload: only `"close"` and
+`"exec error"` are the socket dying; everything else becomes a `Frame::Failed`,
+which errors a waiting request and is skipped by `next_update`. The tag was
+chosen over `WebSocket::ready_state()` because it is pure data, so the
+decision is unit-tested off-wasm rather than being browser-only — and
+`ready_state` is not even reliable at `onerror` time.
+
+And a graceful close fires `onclose` **once**. One frame, one waiter: a
+request in flight consumes it and bails correctly, the app resumes watching,
+and `next_update` — which has no timeout by design and reads an inbox that can
+never end — parks forever on a dead socket, showing a stale board. So
+`CloseLatch` records the first genuine close and both `next_response` and
+`next_update` check it *before* awaiting. A survivable error must never latch
+it, or one bad frame permanently convinces the client the node is gone.
 
 That inbox carries `Frame`, not `HostResponse`, and that is the second half.
 `WebApi`'s result handler takes `Result<HostResponse, ClientError>` — the node
@@ -698,7 +732,7 @@ an `ApplicationMessages` against an unbound key) through the `Err` side. An
 a rejected move spins forever, looking exactly like a healthy idle
 correspondence game. `route` therefore classifies four cases, not two —
 `Response`, `Notification`, `Failed`, `Closed` — and it is ungated and pure, so
-all four are unit-tested off-wasm.
+all four are unit-tested off-wasm, as are `socket_is_gone` and `CloseLatch`.
 
 **`BrowserClient` bounds a request with `setTimeout`, mirroring
 `cli/src/ws.rs`.** Same 30-second `RESPONSE_TIMEOUT`, same "name the operation
@@ -727,7 +761,7 @@ browser coverage.
 
 ## Testing
 
-`cargo test --workspace --locked` — 155 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 161 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
 9 delegate adapter tests, 16 `adjourn-client` integration tests, and 14
 `adjourn-ui` tests (8 board, 6 routing — see "UI" above for what that number
@@ -771,15 +805,21 @@ a corresponding law test, not just a happy-path test.
   themselves if it is absent locally -- but panic instead if `CI` is set, so a
   skip can never masquerade as a pass in CI (see
   `client/tests/common/mod.rs::contract_wasm`).
-- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (6) — both run natively,
+- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (12) — both run natively,
   not on wasm: the opening position and its mirror for Black, square
   selection and legal-move highlighting, promotion detection on both back
   ranks, and (`routing.rs`) that `route` tells a response from an update
   notification and never confuses the two, that a node-reported `Err` frame
   routes to `Failed` rather than being dropped, and that a socket close routes
-  to `Closed`. Those last three are the transport's error paths pulled out as
-  a pure function precisely so they are testable off-wasm — the same move
-  `route` itself was extracted for. What still needs a real browser, and has
+  to `Closed`. Then the two halves of the close story: `socket_is_gone`
+  accepts only `onclose`/`onerror` and refuses every decode and reassembly
+  tag (a live-socket error reported as a close would silently end `watch`),
+  and `CloseLatch` keeps the first close reason forever while no survivable
+  error ever latches it (a close is one queue item, so a request in flight can
+  consume the only one and leave `next_update` parked on a dead socket with no
+  timeout to save it). All of these are the transport's error decisions pulled
+  out as pure functions precisely so they are testable off-wasm — the same
+  move `route` itself was extracted for. What still needs a real browser, and has
   no coverage: `connect`, the `setTimeout` that bounds a request, and that the
   error handler actually keeps firing after connect. Both files are
   pure-function tests with no socket and no DOM in the loop. This is the entire automated test surface

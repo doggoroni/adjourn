@@ -25,6 +25,31 @@
 //! `Closed` marker into the same inbox, which is what lets `next_update`
 //! honestly return `Ok(None)` per `NodeClient`'s contract.
 //!
+//! Two refinements of that, both of them bugs if you get them wrong.
+//!
+//! **Not every call of the error handler is a dead socket.** `freenet-stdlib`
+//! funnels far more than socket death through it: a non-binary frame
+//! (`browser.rs` ~55), a bincode deserialize failure (~69), two stream
+//! reassembly failures (~100, ~112) and four send-side paths (~187, ~204,
+//! ~238, ~242) all call the same closure, alongside the genuine `onerror`
+//! (~128) and `onclose` (~152). Synthesising `Closed` for all of them means one
+//! undeserialisable frame -- a version skew, a reassembly failure past
+//! `MAX_CONCURRENT_STREAMS` -- ends `watch` on a perfectly live socket with no
+//! error surfaced anywhere, which is the exact failure `watch` exists to
+//! prevent. [`socket_is_gone`] draws the line, and everything on the other side
+//! of it becomes a [`Frame::Failed`]: an error for whoever is waiting, a skip
+//! for whoever is not.
+//!
+//! **A close is one queue item, and only one waiter gets it.** A graceful
+//! server-side close (a node restart, code 1000/1001) fires `onclose` exactly
+//! once. If a request is in flight, `next_response` consumes that single
+//! `Closed` and bails correctly -- and then the app resumes watching,
+//! `next_update` finds `pending` empty, and parks on an inbox that will never
+//! yield another frame and can never end. It would hang forever on a dead
+//! socket, showing a stale board. So the close is LATCHED: [`CloseLatch`]
+//! records the first genuine close, and both `next_response` and `next_update`
+//! consult it before they await. A recoverable failure must never latch it.
+//!
 //! Update notifications arrive on the same channel as request answers, so they
 //! are separated by [`route`] and parked in `pending`. Mistaking one for the
 //! other would let whichever request is in flight swallow a move, which is
@@ -47,20 +72,81 @@ use freenet_stdlib::prelude::*;
 /// One thing that came off the bridge channel.
 ///
 /// `Result` mirrors `WebApi`'s handler argument (the stdlib's `HostResult`,
-/// which is a private alias, hence the type spelled out). `Closed` is
-/// synthesised by the error handler and has no `WebApi` counterpart.
+/// which is a private alias, hence the type spelled out). `Failed` and `Closed`
+/// are both synthesised by the error handler and have no `WebApi` counterpart;
+/// [`socket_is_gone`] decides which of the two a given stdlib error becomes.
 ///
 /// Not boxed, despite `clippy::large_enum_variant`: the large variant is the
-/// one that arrives on every single frame, and `Closed` arrives at most twice
-/// in a session. Boxing would buy 200-odd bytes on the rarest case by adding
-/// an allocation to the hottest one.
+/// one that arrives on every single frame, while `Failed` and `Closed` arrive
+/// only when something has gone wrong. Boxing would buy 200-odd bytes on the
+/// rare cases by adding an allocation to the hot one. (There is no bound on how
+/// many of either arrive: the stdlib's error handler is called for recoverable
+/// decode failures too, and nothing stops `onerror` and `onclose` both firing.)
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Frame {
     /// What the node said: a response, or a failure it attributes to a request.
     Result(Result<HostResponse, ClientError>),
-    /// The socket errored or closed. Terminal for every waiter.
+    /// The transport reported something that is NOT the socket dying -- an
+    /// undecodable frame, a reassembly failure, a refused send. Fatal to a
+    /// request that is waiting, survivable for the connection.
+    Failed(String),
+    /// The socket errored or closed. Terminal for every waiter, forever.
     Closed(String),
+}
+
+/// Does this `freenet-stdlib` error mean the socket itself is gone?
+///
+/// The argument is the `source` field of the JSON payload the stdlib puts in
+/// `Error::ConnectionError`. Only two of its call sites are the socket dying:
+/// `onclose` tags itself `"close"`, and `onerror` -- which the WebSocket spec
+/// fires only on a connection failure, always followed by a close -- tags
+/// itself `"exec error"`. Every other tag (`"host response decoding"`,
+/// `"host response deserialization"`, `"stream reassembly deserialization"`,
+/// `"streaming reassembly"`) is a frame-level problem on a live socket, and the
+/// send-side paths carry no `source` at all -- they set `origin` instead, and
+/// their failure is already returned to the caller by `WebApi::send`, so
+/// treating them as survivable here loses nothing.
+///
+/// Erring towards "survivable" is the safe direction. A genuine close misread
+/// as recoverable still surfaces: the next `send` fails its ready-state
+/// precondition, and the next frame the socket produces is the `onclose` that
+/// does latch. A recoverable error misread as a close latches [`CloseLatch`]
+/// permanently and silently ends `watch` on a live socket.
+///
+/// Chosen over inspecting `WebSocket::ready_state()` in the handler because it
+/// is a pure function of data the stdlib already hands us -- so it is decided
+/// off-wasm and unit-tested, the `route` precedent -- whereas `ready_state` is
+/// a live JS object, testable only in a browser, and is not even reliable at
+/// `onerror` time (the spec does not pin the state transition to the event).
+pub fn socket_is_gone(source: Option<&str>) -> bool {
+    matches!(source, Some("close") | Some("exec error"))
+}
+
+/// The sticky record of a socket that has died.
+///
+/// `Frame::Closed` is a single queue item and only one waiter can consume it,
+/// so "the socket is dead" cannot be represented by the frame alone -- see the
+/// module docs. This latch turns that one-shot event into a permanent state
+/// every later call can read.
+#[derive(Debug, Default)]
+pub struct CloseLatch(Option<String>);
+
+impl CloseLatch {
+    /// Latch iff `routed` is a genuine close. First reason wins: it is the one
+    /// that explains why the connection ended.
+    pub fn observe(&mut self, routed: &Routed) {
+        if let Routed::Closed(why) = routed {
+            if self.0.is_none() {
+                self.0 = Some(why.clone());
+            }
+        }
+    }
+
+    /// Why the connection is gone, or `None` while it may still be alive.
+    pub fn why(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
 }
 
 /// What a frame from the node turned out to be.
@@ -79,6 +165,7 @@ pub enum Routed {
 pub fn route(frame: Frame) -> Routed {
     match frame {
         Frame::Closed(why) => Routed::Closed(why),
+        Frame::Failed(why) => Routed::Failed(why),
         Frame::Result(Err(e)) => Routed::Failed(e.to_string()),
         Frame::Result(Ok(HostResponse::ContractResponse(
             ContractResponse::UpdateNotification { key, update },
@@ -89,12 +176,13 @@ pub fn route(frame: Frame) -> Routed {
 
 #[cfg(target_arch = "wasm32")]
 mod browser {
-    use super::{route, Frame, Routed};
+    use super::{route, socket_is_gone, CloseLatch, Frame, Routed};
     use adjourn_client::node::NodeClient;
     use adjourn_core::delegate_api::{Request, Response};
     use anyhow::{anyhow, bail};
     use freenet_stdlib::client_api::{
-        ClientRequest, ContractRequest, ContractResponse, DelegateRequest, HostResponse, WebApi,
+        ClientRequest, ContractRequest, ContractResponse, DelegateRequest, Error as StdlibError,
+        HostResponse, WebApi,
     };
     use freenet_stdlib::prelude::*;
     use futures::channel::{mpsc, oneshot};
@@ -171,6 +259,8 @@ mod browser {
         inbox: mpsc::UnboundedReceiver<Frame>,
         pending: VecDeque<(ContractInstanceId, UpdateData<'static>)>,
         delegate_key: Option<DelegateKey>,
+        /// Set once, by the first genuine close. See [`CloseLatch`].
+        closed: CloseLatch,
     }
 
     impl BrowserClient {
@@ -202,12 +292,31 @@ mod browser {
                     let _ = tx.unbounded_send(Frame::Result(result));
                 },
                 move |err| {
+                    // Is the socket actually gone, or is this a frame the
+                    // stdlib could not decode on a live one? The handler is
+                    // called for both (see `socket_is_gone`), and only the
+                    // former may become a `Closed`. The stdlib puts a JSON
+                    // payload in `ConnectionError` whose `source` field names
+                    // the call site; that payload's type is wasm-only, so it is
+                    // unwrapped here and the decision itself stays in the
+                    // ungated, unit-tested `socket_is_gone`.
+                    let gone = match &err {
+                        StdlibError::ConnectionError(detail) => {
+                            socket_is_gone(detail.get("source").and_then(|s| s.as_str()))
+                        }
+                        StdlibError::ConnectionClosed | StdlibError::ChannelClosed => true,
+                        // Non-exhaustive upstream. An unrecognised error is
+                        // reported, not treated as a death sentence.
+                        _ => false,
+                    };
                     let why = format!("{err:?}");
                     // Job 1, at most once: fail `connect` if it is still
                     // waiting. Without this a node that is down -- a bad URL, a
                     // refused connection -- would fire `onerror` into a handler
                     // that discarded it, `onopen` would never fire, and
-                    // `open_rx.await` below would hang forever.
+                    // `open_rx.await` below would hang forever. ANY error
+                    // resolves it, `gone` or not: nothing useful can arrive on
+                    // a socket that never opened.
                     if let Some(tx) = err_tx.borrow_mut().take() {
                         let _ = tx.send(Err(why.clone()));
                     }
@@ -216,7 +325,12 @@ mod browser {
                     // path from a dead socket to a Rust error. The inbox cannot
                     // signal it by ending, because freenet-stdlib `forget()`s
                     // the onmessage closure and so never drops the sender.
-                    let _ = err_inbox.unbounded_send(Frame::Closed(why));
+                    let frame = if gone {
+                        Frame::Closed(why)
+                    } else {
+                        Frame::Failed(why)
+                    };
+                    let _ = err_inbox.unbounded_send(frame);
                 },
                 move || {
                     if let Some(tx) = open_tx.borrow_mut().take() {
@@ -236,6 +350,7 @@ mod browser {
                 inbox,
                 pending: VecDeque::new(),
                 delegate_key: None,
+                closed: CloseLatch::default(),
             })
         }
 
@@ -263,8 +378,16 @@ mod browser {
         /// this request will never be answered; a `Closed` frame is the socket
         /// saying nothing ever will be.
         async fn next_response(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+            // The latch first: a close another waiter already consumed is still
+            // a close, and awaiting a frame that can never come would burn the
+            // whole timeout before saying so.
+            if let Some(why) = self.closed.why() {
+                bail!("the connection is closed, so {op} can never be answered: {why}");
+            }
             loop {
-                match route(self.next_frame(op).await?) {
+                let routed = route(self.next_frame(op).await?);
+                self.closed.observe(&routed);
+                match routed {
                     Routed::Response(resp) => return Ok(resp),
                     Routed::Notification(id, update) => self.pending.push_back((id, update)),
                     Routed::Failed(why) => {
@@ -427,21 +550,32 @@ mod browser {
         async fn next_update(
             &mut self,
         ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
+            // Parked notifications first: they were genuinely received, and a
+            // socket that has since died does not un-receive them.
             if let Some(parked) = self.pending.pop_front() {
                 return Ok(Some(parked));
+            }
+            // Then the latch, BEFORE awaiting. A close is one queue item; if an
+            // in-flight request consumed it, this await would never wake --
+            // there is deliberately no timeout here, and the inbox never ends.
+            if self.closed.why().is_some() {
+                return Ok(None);
             }
             loop {
                 let Some(frame) = self.inbox.next().await else {
                     return Ok(None);
                 };
-                match route(frame) {
+                let routed = route(frame);
+                self.closed.observe(&routed);
+                match routed {
                     Routed::Notification(id, update) => return Ok(Some((id, update))),
                     // The socket is gone. `NodeClient` documents `None` as
                     // "no more updates will arrive", which is exactly true.
                     Routed::Closed(_) => return Ok(None),
-                    // A late answer -- or a late failure -- for a request
-                    // nobody is waiting on. Dropping the connection over one
-                    // would end a healthy session.
+                    // A late answer -- or a failure the socket survived,
+                    // such as one undecodable frame -- with nobody waiting on
+                    // it. Ending a healthy session over either would be the
+                    // very stall `watch` exists to prevent.
                     Routed::Response(_) | Routed::Failed(_) => continue,
                 }
             }

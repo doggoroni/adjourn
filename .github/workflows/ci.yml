@@ -118,11 +118,13 @@ jobs:
       # `adjourn-ui` must not reach the contract or the delegate: they are
       # wasmtime modules the UI EMBEDS as bytes, not crates it links. This is
       # the command `ui/Cargo.toml` cites as proof, run for real. `-e normal`
-      # is load-bearing -- dev-dependencies resolve with default features, so a
-      # single dev-dep on `adjourn-client` turns its `fake` feature back on and
-      # puts both crates in the graph. Without this step, reverting the
-      # path-dependency workaround would be undetectable by the documented
-      # procedure.
+      # is load-bearing because it prints ONLY the graph that ships, and is
+      # therefore unaffected by dev-dependencies. The plain `cargo tree` would
+      # be misleading here: a dev-dep on `adjourn-client` resolves with default
+      # features, turns its `fake` feature back on, and prints both crates even
+      # when the shipping graph is clean. Without this step, reverting the
+      # path-dependency workaround -- which really does put both crates in the
+      # `-e normal` graph -- would be undetectable by the documented procedure.
       - name: Assert the UI graph excludes the contract and the delegate
         run: |
           graph=$(cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e normal --locked)

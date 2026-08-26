@@ -1,6 +1,6 @@
 use adjourn_client::node::contract_container;
 use adjourn_core::GameParams;
-use adjourn_ui::node::{route, Frame, Routed};
+use adjourn_ui::node::{route, socket_is_gone, CloseLatch, Frame, Routed};
 use freenet_stdlib::client_api::{ClientError, ContractResponse, ErrorKind, HostResponse};
 use freenet_stdlib::prelude::*;
 
@@ -101,4 +101,90 @@ fn a_closed_socket_is_routed_as_closed() {
         Routed::Closed(why) => assert_eq!(why, "connection closed"),
         other => panic!("expected a close, got {other:?}"),
     }
+}
+
+/// `freenet-stdlib` calls the SAME error handler for a dead socket and for a
+/// frame it merely failed to decode. Only `onclose` (`source: "close"`) and
+/// `onerror` (`source: "exec error"`) are the socket dying.
+#[test]
+fn only_a_real_close_or_socket_error_counts_as_the_socket_being_gone() {
+    assert!(socket_is_gone(Some("close")));
+    assert!(socket_is_gone(Some("exec error")));
+}
+
+/// The other direction, and the one that bites: an undecodable frame or a
+/// reassembly failure on a LIVE socket. Reported as `Closed`, each of these
+/// would end `watch` silently -- the exact failure `watch` exists to prevent.
+#[test]
+fn a_decode_or_reassembly_failure_is_not_the_socket_being_gone() {
+    for source in [
+        "host response decoding",
+        "host response deserialization",
+        "stream reassembly deserialization",
+        "streaming reassembly",
+    ] {
+        assert!(
+            !socket_is_gone(Some(source)),
+            "{source:?} happens on a live socket; treating it as a close ends \
+             watch with no error surfaced anywhere"
+        );
+    }
+    // The send-side paths tag themselves `origin`, not `source`, and their
+    // failure already reaches the caller as `WebApi::send`'s `Err`.
+    assert!(!socket_is_gone(None));
+}
+
+/// A synthesised failure routes to `Failed`, not `Closed`: an error for a
+/// request that is waiting, a skip for `next_update`.
+#[test]
+fn a_transport_failure_is_routed_as_a_failure_not_a_close() {
+    match route(Frame::Failed("host response deserialization".into())) {
+        Routed::Failed(why) => assert!(why.contains("deserialization")),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+/// `Frame::Closed` is a single queue item: whichever waiter reads it consumes
+/// it. Without a latch, a request in flight bails correctly and the NEXT
+/// `next_update` parks on an inbox that can never yield again -- no timeout by
+/// design, and the stdlib leaks the sender so it never ends. Forever, on a
+/// dead socket, showing a stale board.
+#[test]
+fn a_close_latches_so_a_later_waiter_still_sees_it() {
+    let mut latch = CloseLatch::default();
+    assert_eq!(latch.why(), None, "a fresh latch must not claim a close");
+    latch.observe(&route(Frame::Closed("connection closed".into())));
+    assert_eq!(latch.why(), Some("connection closed"));
+    // Still latched after the frame has been consumed and forgotten.
+    assert_eq!(latch.why(), Some("connection closed"));
+}
+
+/// The first reason wins -- `onerror` then `onclose` is one death, and the
+/// first message is the one that explains it.
+#[test]
+fn the_first_close_reason_is_the_one_kept() {
+    let mut latch = CloseLatch::default();
+    latch.observe(&route(Frame::Closed("exec error: refused".into())));
+    latch.observe(&route(Frame::Closed("connection closed".into())));
+    assert_eq!(latch.why(), Some("exec error: refused"));
+}
+
+/// The interaction between the two findings: a recoverable error must NOT
+/// latch. If it did, one undecodable frame would permanently convince every
+/// later call that the connection is dead.
+#[test]
+fn nothing_but_a_close_latches() {
+    let mut latch = CloseLatch::default();
+    latch.observe(&route(Frame::Failed(
+        "host response deserialization".into(),
+    )));
+    latch.observe(&route(Frame::Result(Err(ClientError::from(
+        ErrorKind::NodeUnavailable,
+    )))));
+    latch.observe(&route(ok(HostResponse::Ok)));
+    assert_eq!(
+        latch.why(),
+        None,
+        "a survivable error latched the connection shut"
+    );
 }
