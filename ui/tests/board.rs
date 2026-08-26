@@ -146,3 +146,76 @@ fn promotion_is_detected_only_for_a_pawn_reaching_the_last_rank() {
         "an ordinary pawn push does not"
     );
 }
+
+/// A decided game offers nothing to click. Otherwise the board would invite a
+/// move the projection will ignore, and the record would be permanent.
+///
+/// Deliberately ends the game by **resignation**, not checkmate. A mated
+/// position already has zero legal moves for the side to move, so a
+/// checkmate-based version of this test passes whether or not the
+/// game-over gate in `squares` exists -- selecting a piece of the side NOT
+/// to move yields no targets either way, for reasons having nothing to do
+/// with `status.decision`. Resignation is unconditional and unanchored (see
+/// invariant 7): it ends the game while the raw position still has an
+/// ordinary set of legal moves available, so this is the version that
+/// actually exercises the `_ => Vec::new()` suppression arm in `squares`.
+#[test]
+fn a_finished_game_marks_no_legal_targets() {
+    let (mut state, params) = start();
+    let w = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let b = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+    for (i, uci) in ["e2e4", "e7e5"].iter().enumerate() {
+        let key = if i % 2 == 0 { &w } else { &b };
+        let rec = adjourn_core::make_move(&state, &params, key, uci)
+            .unwrap_or_else(|| panic!("move {} ({uci}) rejected", i + 1));
+        assert!(state.insert_verified(&rec, &params));
+    }
+    // Black resigns despite an ordinary, wide-open position: the board still
+    // has plenty of legal moves, but the game is decided.
+    let resign = adjourn_core::Record::sign(&b, &params, adjourn_core::Body::Resign);
+    assert!(state.insert_verified(&resign, &params));
+
+    let status = project(&state, &params);
+    assert!(status.is_over(), "resignation ends the game");
+
+    // White's g1 knight has real legal moves (Nf3, Nh3) in this position.
+    let board = squares(&status, Color::White, Some(('g', 1)));
+    assert_eq!(
+        board
+            .iter()
+            .filter(|s| s.marker == Marker::LegalTarget)
+            .count(),
+        0,
+        "a decided game offers no targets"
+    );
+}
+
+/// The white arm of `is_promotion` is covered above by a pawn reaching rank 8.
+/// This covers the black arm: a black pawn reaching rank 1 via legal play,
+/// mirroring the white promotion line's shape (color-flipped, ranks mirrored,
+/// with one neutral white move inserted so White still moves first).
+#[test]
+fn is_promotion_also_fires_for_black_reaching_the_first_rank() {
+    let (mut state, params) = start();
+    let w = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+    let b = ed25519_dalek::SigningKey::from_bytes(&[2u8; 32]);
+
+    // A line that leaves a black pawn on b2 with a promotion available.
+    for (i, uci) in [
+        "d2d3", "b7b5", "a2a4", "b5a4", "b2b3", "a4b3", "h2h3", "b3b2", "h3h4",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let key = if i % 2 == 0 { &w } else { &b };
+        let rec = adjourn_core::make_move(&state, &params, key, uci)
+            .unwrap_or_else(|| panic!("move {} ({uci}) rejected", i + 1));
+        assert!(state.insert_verified(&rec, &params));
+    }
+    let status = project(&state, &params);
+
+    assert!(
+        adjourn_ui::board::is_promotion(&status, ('b', 2), ('b', 1)),
+        "a black pawn reaching the first rank promotes"
+    );
+}
