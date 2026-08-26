@@ -400,6 +400,18 @@ mod browser {
             }
         }
 
+        /// Whether the underlying socket is known dead — a genuine close or
+        /// send-side failure the transport classified as [`socket_is_gone`],
+        /// latched the first time it is observed (see [`CloseLatch`]).
+        ///
+        /// This is the line the actor in `conn.rs` needs: a node-reported
+        /// refusal, an out-of-turn move, a bad paste -- none of those touch
+        /// the socket, so none of them should tear down a healthy connection
+        /// or re-run delegate registration. Only a transport death should.
+        pub fn is_disconnected(&self) -> bool {
+            self.closed.why().is_some()
+        }
+
         pub async fn register_delegate(
             &mut self,
             container: DelegateContainer,

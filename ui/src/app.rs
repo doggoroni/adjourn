@@ -41,8 +41,11 @@ pub fn App() -> Element {
                 }
             }
 
-            if let Some(e) = wires.error.read().clone() {
-                div { class: "error", role: "alert", "{e}" }
+            if let Some(e) = wires.error.cloned() {
+                div { class: "error", role: "alert",
+                    span { "{e}" }
+                    button { onclick: move |_| wires.tx.send(Cmd::ListGames), "retry" }
+                }
             }
             if (wires.busy)() {
                 div { class: "busy", "working…" }
@@ -51,7 +54,8 @@ pub fn App() -> Element {
             match screen() {
                 Screen::List | Screen::New | Screen::Accept | Screen::Game(_) =>
                     rsx! { p { class: "hint", "screen lands in a later task" } },
-                Screen::Settings => rsx! { crate::views::settings::Settings { node_url } },
+                Screen::Settings =>
+                    rsx! { crate::views::settings::Settings { node_url, tx: wires.tx } },
             }
         }
     }
