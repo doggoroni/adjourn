@@ -3,7 +3,60 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>adjourn</title>
+    <!-- Deliberately EMPTY. dx APPENDS `[web.app] title` from Dioxus.toml
+         into whatever <title> it finds, and does nothing when there is no
+         <title> element at all. So text here would be prefixed to the
+         configured title ("adjournadjourn"), and removing the element
+         entirely yields no title. An empty element is the only combination
+         that produces exactly the configured title. -->
+    <title></title>
+    <style>
+      :root {
+        --light: #ebecd0;
+        --dark: #779556;
+        --target: #b9ca43;
+        --selected: #f6f669;
+      }
+      body {
+        margin: 0;
+        padding: 2rem 1rem;
+        background: #302e2b;
+        color: #e8e6e3;
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .app { max-width: 42rem; margin: 0 auto; }
+      h1 { margin: 0 0 .25rem; font-size: 1.6rem; letter-spacing: .02em; }
+      .sub { margin: 0 0 1.5rem; opacity: .65; font-size: .9rem; }
+      .status { margin-top: 1rem; opacity: .75; font-size: .9rem; }
+
+      /* Eight columns, square cells, capped so the board stays usable on a
+         phone without a media query. */
+      .board {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        width: min(90vw, 34rem);
+        aspect-ratio: 1;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .sq {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        user-select: none;
+      }
+      .sq.light { background: var(--light); }
+      .sq.dark { background: var(--dark); }
+      .sq.selected { background: var(--selected); }
+      .sq.target { background: var(--target); }
+
+      .piece { font-size: min(9vw, 2.6rem); line-height: 1; }
+      /* One glyph set for both sides; colour carries the distinction, so the
+         two never differ in visual weight. */
+      .piece.white { color: #fff; text-shadow: 0 0 2px #000, 0 1px 2px #0008; }
+      .piece.black { color: #1a1a1a; text-shadow: 0 0 1px #fff6; }
+    </style>
   </head>
   <body>
     <div id="main"></div>

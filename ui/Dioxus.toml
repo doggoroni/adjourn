@@ -5,4 +5,7 @@ out_dir = "dist"
 asset_dir = "assets"
 
 [web.app]
+# dx ALWAYS injects a title into index.html's <head> -- falling back to its own
+# "dioxus | ⛺" if this key is absent -- and appends rather than replaces. So
+# index.html deliberately carries no <title> of its own; this is the one source.
 title = "adjourn"
