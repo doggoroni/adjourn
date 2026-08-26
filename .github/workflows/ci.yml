@@ -98,6 +98,9 @@ jobs:
       - name: Assert adjourn-client compiles for the browser
         run: cargo check -p adjourn-client --no-default-features --target wasm32-unknown-unknown --locked
 
+      - name: Assert the UI compiles for the browser
+        run: cargo check -p adjourn-ui --target wasm32-unknown-unknown --locked
+
       - name: Test
         run: cargo test --workspace --locked
 
