@@ -11,3 +11,7 @@
 # Vendored copy of the Freenet whitepaper. Read it locally, but do not
 # redistribute it here: https://freenet.org/whitepaper/
 /freenet-whitepaper.pdf
+
+# Playwright MCP session artifacts (console logs, page snapshots) from manual
+# browser verification of the UI. Regenerated per session; not build output.
+/.playwright-mcp

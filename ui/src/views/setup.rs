@@ -46,7 +46,7 @@ pub fn NewGame(wires: Wires) -> Element {
                 "create invite"
             }
 
-            if let Some(b) = wires.blob.read().clone() {
+            if let Some(b) = wires.invite_blob.cloned() {
                 h3 { "send this invite to your opponent" }
                 textarea { id: "invite-out", readonly: true, rows: 4, "{b}" }
                 h3 { "then paste the offer they send back" }
@@ -113,7 +113,7 @@ pub fn AcceptInvite(wires: Wires) -> Element {
                 }),
                 "accept"
             }
-            if let Some(b) = wires.blob.read().clone() {
+            if let Some(b) = wires.offer_blob.cloned() {
                 h3 { "send this offer back to the inviter" }
                 textarea { id: "offer-out", readonly: true, rows: 4, "{b}" }
             }

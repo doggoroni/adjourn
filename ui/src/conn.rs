@@ -61,8 +61,14 @@ pub struct Wires {
     pub tx: Coroutine<Cmd>,
     pub games: Signal<Vec<GameSummary>>,
     pub view: Signal<Option<GameView>>,
-    /// An invite or offer blob to show the user for copying.
-    pub blob: Signal<Option<String>>,
+    /// The invite blob `NewGame` produces, shown only on the "new game"
+    /// screen. Kept separate from `offer_blob` so navigating between the two
+    /// setup screens never renders one command's output captioned as the
+    /// other's -- see the fix-round-1 note in the task report.
+    pub invite_blob: Signal<Option<String>>,
+    /// The offer blob `Accept` produces, shown only on the "accept invite"
+    /// screen.
+    pub offer_blob: Signal<Option<String>>,
     pub error: Signal<Option<String>>,
     pub busy: Signal<bool>,
     pub connected: Signal<bool>,
@@ -79,7 +85,8 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
 
     let mut games = use_signal(Vec::<GameSummary>::new);
     let mut view = use_signal(|| None::<GameView>);
-    let mut blob = use_signal(|| None::<String>);
+    let mut invite_blob = use_signal(|| None::<String>);
+    let mut offer_blob = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let mut connected = use_signal(|| false);
@@ -143,19 +150,20 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                             browser_nonce()?,
                         )
                         .await?;
-                        blob.set(Some(inv.encode()));
+                        invite_blob.set(Some(inv.encode()));
                     }
                     Cmd::Accept { label, invite } => {
                         let inv = Invite::decode(invite.trim())?;
                         let offer =
                             session::invite_accept(c, &label, &inv, wasm, browser_entropy()?)
                                 .await?;
-                        blob.set(Some(offer.encode()));
+                        offer_blob.set(Some(offer.encode()));
                     }
                     Cmd::Bind { label, offer } => {
                         let off = GameOffer::decode(offer.trim())?;
                         session::game_bind(c, &label, &off, wasm).await?;
-                        blob.set(None);
+                        invite_blob.set(None);
+                        offer_blob.set(None);
                     }
                     Cmd::Open { label } => {
                         view.set(Some(session::open_game_view(c, &label, wasm).await?));
@@ -210,7 +218,8 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
         tx,
         games,
         view,
-        blob,
+        invite_blob,
+        offer_blob,
         error,
         busy,
         connected,
@@ -229,7 +238,8 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
 
     let games = use_signal(Vec::<GameSummary>::new);
     let view = use_signal(|| None::<GameView>);
-    let blob = use_signal(|| None::<String>);
+    let invite_blob = use_signal(|| None::<String>);
+    let offer_blob = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
     let busy = use_signal(|| false);
     let connected = use_signal(|| false);
@@ -244,7 +254,8 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
         tx,
         games,
         view,
-        blob,
+        invite_blob,
+        offer_blob,
         error,
         busy,
         connected,
