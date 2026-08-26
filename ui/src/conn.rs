@@ -56,7 +56,7 @@ pub enum Cmd {
 }
 
 /// The handle every screen gets: one sender, and the signals results land in.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Wires {
     pub tx: Coroutine<Cmd>,
     pub games: Signal<Vec<GameSummary>>,
