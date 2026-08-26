@@ -79,6 +79,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "dioxus",
+ "ed25519-dalek",
  "freenet-stdlib",
  "futures",
  "shakmaty",
