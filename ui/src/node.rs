@@ -52,7 +52,9 @@ mod browser {
     use freenet_stdlib::prelude::*;
     use futures::channel::{mpsc, oneshot};
     use futures::StreamExt;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     pub struct BrowserClient {
         api: WebApi,
@@ -71,8 +73,20 @@ mod browser {
                 .map_err(|e| anyhow!("could not open a WebSocket to {url}: {e:?}"))?;
 
             let (tx, inbox) = mpsc::unbounded();
-            let (open_tx, open_rx) = oneshot::channel();
-            let mut open_tx = Some(open_tx);
+            let (open_tx, open_rx) = oneshot::channel::<Result<(), String>>();
+            // Both callbacks race for this: whichever fires first resolves
+            // `connect`. `onerror`/`onclose` route to the error handler, NOT
+            // to `onopen_handler` -- freenet-stdlib's browser `WebApi` wires
+            // both to the same error-handler closure (see
+            // `client_api/browser.rs`'s `onerror_callback` at line 128 and
+            // `onclose_callback` at line 152, both calling `eh(...)`, never
+            // the onopen callback). Without this, a node that never accepts
+            // the connection -- a bad URL, a refused connection, a node that
+            // is down -- would fire `onerror` into a handler that discards
+            // it, `onopen` would never fire, and `open_rx.await` below would
+            // hang forever with no error and no timeout.
+            let open_tx = Rc::new(RefCell::new(Some(open_tx)));
+            let err_tx = Rc::clone(&open_tx);
 
             let api = WebApi::start(
                 socket,
@@ -82,17 +96,27 @@ mod browser {
                         let _ = tx.unbounded_send(resp);
                     }
                 },
-                |_err| {},
+                move |err| {
+                    // Only the first callback to fire resolves the future;
+                    // taking the `Option` makes every later call (e.g. an
+                    // error reported long after a successful connect) a
+                    // harmless no-op instead of a panic on a re-send.
+                    if let Some(tx) = err_tx.borrow_mut().take() {
+                        let _ = tx.send(Err(format!("{err:?}")));
+                    }
+                },
                 move || {
-                    if let Some(tx) = open_tx.take() {
-                        let _ = tx.send(());
+                    if let Some(tx) = open_tx.borrow_mut().take() {
+                        let _ = tx.send(Ok(()));
                     }
                 },
             );
 
-            open_rx
-                .await
-                .map_err(|_| anyhow!("the WebSocket closed before it opened"))?;
+            match open_rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => bail!("could not connect to {url}: {e}"),
+                Err(_) => bail!("the WebSocket closed before it opened"),
+            }
 
             Ok(Self {
                 api,
@@ -122,7 +146,7 @@ mod browser {
             &mut self,
             container: DelegateContainer,
         ) -> anyhow::Result<()> {
-            self.delegate_key = Some(container.key().clone());
+            let key = container.key().clone();
             self.api
                 .send(ClientRequest::DelegateOp(
                     DelegateRequest::RegisterDelegate {
@@ -134,7 +158,15 @@ mod browser {
                 .await
                 .map_err(|e| anyhow!("sending RegisterDelegate: {e}"))?;
             match self.next_response("RegisterDelegate").await? {
-                HostResponse::Ok | HostResponse::DelegateResponse { .. } => Ok(()),
+                HostResponse::Ok | HostResponse::DelegateResponse { .. } => {
+                    // Only recorded once the node has actually confirmed the
+                    // registration -- setting this eagerly would let a failed
+                    // registration still pass `delegate()`'s "no delegate
+                    // registered" guard and send a call against a key the
+                    // node never bound.
+                    self.delegate_key = Some(key);
+                    Ok(())
+                }
                 other => bail!("unexpected response to RegisterDelegate: {other:?}"),
             }
         }
