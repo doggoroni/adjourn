@@ -20,6 +20,21 @@ use std::sync::{Arc, Mutex};
 
 use crate::node::NodeClient;
 
+/// One entry in the world's write log: what a subscribed peer would be told.
+///
+/// A real node broadcasts to subscribers the payload the writer submitted. A
+/// PUT carries whole state; an UPDATE carries the delta `sign_and_submit`
+/// sent. A fake that always announced `State` would leave `watch_label`'s
+/// `Delta` arm -- the arm that actually runs in production -- untested, so
+/// the two are kept apart here exactly as the node keeps them apart.
+#[derive(Clone)]
+pub enum Broadcast {
+    /// A PUT: the whole encoded `GameState`.
+    State(Vec<u8>),
+    /// An UPDATE: the encoded `Delta` (`Vec<Record>`) the writer submitted.
+    Delta(Vec<u8>),
+}
+
 /// Contract params and state, keyed by the contract instance id's raw bytes.
 ///
 /// `ContractInstanceId` does not implement `Ord` (freenet-stdlib 0.8.5), so a
@@ -35,10 +50,20 @@ use crate::node::NodeClient;
 ///
 /// Shared across fakes so they converge on the same public state, exactly
 /// like two real nodes replicating the same contract.
-pub type World = Arc<Mutex<BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>>>;
+///
+/// The shared contract world: current state per contract, plus an ordered log
+/// of every write so a second fake can observe the first's writes the way a
+/// subscribed peer would.
+#[derive(Default)]
+pub struct WorldInner {
+    pub contracts: BTreeMap<[u8; 32], (Parameters<'static>, Vec<u8>)>,
+    pub log: Vec<([u8; 32], Broadcast)>,
+}
+
+pub type World = Arc<Mutex<WorldInner>>;
 
 pub fn shared_world() -> World {
-    Arc::new(Mutex::new(BTreeMap::new()))
+    Arc::new(Mutex::new(WorldInner::default()))
 }
 
 /// A `MemoryStore` for delegate secrets, paired with a handle to the shared
@@ -69,6 +94,7 @@ impl SecretStore for WorldBackedStore {
         self.world
             .lock()
             .ok()?
+            .contracts
             .get(id)
             .map(|(_, state)| state.clone())
     }
@@ -79,6 +105,18 @@ impl SecretStore for WorldBackedStore {
 pub struct FakeNode {
     world: World,
     store: WorldBackedStore,
+    cursor: usize,
+    /// Contracts this node has asked to be subscribed to via `get(.., true)`,
+    /// each mapped to the log length AT THE MOMENT IT SUBSCRIBED.
+    ///
+    /// `next_update` surfaces a log entry only for a subscribed id, and only
+    /// if the entry landed at or after that id's subscribe point -- modeling
+    /// the real node's requirement that watching needs an explicit subscribe,
+    /// and that a subscription is not retroactive. Replaying history to a
+    /// late subscriber would be a guarantee no real node makes, and would
+    /// hide exactly the lost-update window `watch_label` has to defend
+    /// against.
+    subscribed: BTreeMap<[u8; 32], usize>,
 }
 
 impl FakeNode {
@@ -89,6 +127,8 @@ impl FakeNode {
                 world: world.clone(),
             },
             world,
+            cursor: 0,
+            subscribed: BTreeMap::new(),
         }
     }
 
@@ -100,6 +140,7 @@ impl FakeNode {
         self.world
             .lock()
             .expect("world lock poisoned")
+            .contracts
             .insert(*id, (Parameters::from(Vec::<u8>::new()), state));
     }
 }
@@ -108,22 +149,26 @@ impl NodeClient for FakeNode {
     async fn get(
         &mut self,
         id: ContractInstanceId,
-        _subscribe: bool,
+        subscribe: bool,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        Ok(self
-            .world
-            .lock()
-            .expect("world lock poisoned")
-            .get(&*id)
-            .map(|(_, state)| state.clone()))
+        let world = self.world.lock().expect("world lock poisoned");
+        if subscribe {
+            // `or_insert`, not `insert`: re-subscribing must not move an
+            // existing subscription's start point forward past entries it has
+            // not delivered yet.
+            let now = world.log.len();
+            self.subscribed.entry(*id).or_insert(now);
+        }
+        Ok(world.contracts.get(&*id).map(|(_, state)| state.clone()))
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {
         let id = *container.id();
-        self.world
-            .lock()
-            .expect("world lock poisoned")
-            .insert(*id, (container.params(), state));
+        let mut world = self.world.lock().expect("world lock poisoned");
+        world
+            .contracts
+            .insert(*id, (container.params(), state.clone()));
+        world.log.push((*id, Broadcast::State(state)));
         Ok(())
     }
 
@@ -133,6 +178,7 @@ impl NodeClient for FakeNode {
             .world
             .lock()
             .expect("world lock poisoned")
+            .contracts
             .get(&*id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("fake node has no state for contract {id}"))?;
@@ -140,19 +186,49 @@ impl NodeClient for FakeNode {
         let modification = Contract::update_state(
             params.clone(),
             State::from(current),
-            vec![UpdateData::Delta(StateDelta::from(delta))],
+            vec![UpdateData::Delta(StateDelta::from(delta.clone()))],
         )
         .map_err(|e| anyhow::anyhow!("update_state: {e:?}"))?;
-        let new_state = modification.unwrap_valid();
+        let new_state = modification.unwrap_valid().as_ref().to_vec();
 
-        self.world
-            .lock()
-            .expect("world lock poisoned")
-            .insert(*id, (params, new_state.as_ref().to_vec()));
+        let mut world = self.world.lock().expect("world lock poisoned");
+        world.contracts.insert(*id, (params, new_state));
+        // Broadcast the DELTA, not the new state: that is what a real node
+        // sends to subscribers for an update, and therefore what `watch`
+        // actually decodes in production.
+        world.log.push((*id, Broadcast::Delta(delta)));
         Ok(())
     }
 
     async fn delegate(&mut self, req: Request) -> anyhow::Result<Response> {
         Ok(adjourn_delegate::handle(&mut self.store, None, req))
+    }
+
+    async fn next_update(
+        &mut self,
+    ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>> {
+        loop {
+            let entry = {
+                let world = self.world.lock().expect("world lock poisoned");
+                world.log.get(self.cursor).cloned()
+            };
+            let Some((id, broadcast)) = entry else {
+                return Ok(None);
+            };
+            let at = self.cursor;
+            self.cursor += 1;
+            // Not subscribed, or subscribed only after this entry landed:
+            // skip it. The cursor has already advanced past it, so it never
+            // stalls the log.
+            match self.subscribed.get(&id) {
+                Some(from) if at >= *from => {}
+                _ => continue,
+            }
+            let update = match broadcast {
+                Broadcast::State(bytes) => UpdateData::State(State::from(bytes)),
+                Broadcast::Delta(bytes) => UpdateData::Delta(StateDelta::from(bytes)),
+            };
+            return Ok(Some((ContractInstanceId::new(id), update)));
+        }
     }
 }

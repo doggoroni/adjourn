@@ -8,10 +8,10 @@ one machine, each acting as one player.
 **Sections 1–3 (build, and starting the two nodes) work today.** Section 4
 (the `adjourn` game commands: `init`, `invite`, `game bind`, `move`, `show`,
 ...) is now wired: `cli/src/main.rs` routes every command below to
-`adjourn_cli::session` (Task 9). `watch` is the one command in the design
-spec left unimplemented — it needs a streaming `NodeClient` method that does
-not exist yet, so it prints an error and exits non-zero rather than hanging
-or silently doing nothing; poll with `adjourn show` instead.
+`adjourn_client::session`. `watch` is now implemented too: it subscribes to
+the contract and streams every update until the game ends. It has been
+exercised against `FakeNode`, not yet against a live node — poll with
+`adjourn show` if it misbehaves.
 
 Against a real `freenet 0.2.130` node on 2026-08-24: `adjourn init`
 registered the delegate, `adjourn key new` returned a key, and `adjourn

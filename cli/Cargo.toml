@@ -14,21 +14,14 @@ path = "src/main.rs"
 
 [dependencies]
 adjourn-core.workspace = true
-adjourn-contract.workspace = true
-adjourn-delegate.workspace = true
+adjourn-client.workspace = true
 freenet-stdlib = { workspace = true, features = ["net"] }
-ciborium.workspace = true
-serde.workspace = true
-serde_bytes.workspace = true
 bs58.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 anyhow.workspace = true
-ed25519-dalek.workspace = true
-thiserror.workspace = true
 rand.workspace = true
-shakmaty.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

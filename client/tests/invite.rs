@@ -1,4 +1,4 @@
-use adjourn_cli::invite::{GameOffer, Invite, InviteError, OFFER_FORMAT};
+use adjourn_client::invite::{GameOffer, Invite, InviteError, OFFER_FORMAT};
 use adjourn_core::delegate_api::Side;
 use adjourn_core::GameParams;
 

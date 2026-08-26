@@ -1,8 +1,8 @@
 mod common;
 
-use adjourn_cli::fake::{shared_world, FakeNode};
-use adjourn_cli::node::NodeClient;
-use adjourn_cli::session::{game_bind, invite_accept, invite_new, play_move, show_label};
+use adjourn_client::fake::{shared_world, FakeNode};
+use adjourn_client::node::NodeClient;
+use adjourn_client::session::{game_bind, invite_accept, invite_new, play_move, show_label};
 use adjourn_core::delegate_api::Side;
 use adjourn_core::{GameState, Reason};
 use shakmaty::Color;
@@ -22,8 +22,10 @@ async fn scholars_mate_end_to_end() {
     let world = shared_world();
     let (mut alice, mut bob) = (FakeNode::new(world.clone()), FakeNode::new(world));
 
-    let invite = invite_new(&mut alice, "alice", Side::White).await.unwrap();
-    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone())
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
         .await
         .unwrap();
     let contract_id = game_bind(&mut alice, "alice", &offer, wasm.clone())
@@ -96,3 +98,13 @@ async fn scholars_mate_end_to_end() {
     let bob_state = GameState::decode(&bob_bytes).expect("bob's state decodes");
     assert_eq!(alice_state.encode(), bob_state.encode());
 }
+
+/// Fixed test entropy. `adjourn-client` takes randomness as a parameter (it
+/// must compile for wasm32, where `rand` does not), so tests supply constants
+/// -- deterministic keys and a deterministic contract id, which is strictly
+/// better for a test than a fresh random one every run. The two sides differ
+/// so they never derive the same signing key.
+const ALICE_ENTROPY: [u8; 32] = [0xa1; 32];
+const BOB_ENTROPY: [u8; 32] = [0xb0; 32];
+/// The `GameParams` nonce the inviter authors.
+const NONCE: [u8; 16] = [0x5e; 16];

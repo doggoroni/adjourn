@@ -1,0 +1,28 @@
+[package]
+name = "adjourn-client"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# ON by default so `cargo test --workspace` keeps working with no extra flags.
+# The UI sets `default-features = false` to keep the contract and delegate
+# crates out of its wasm build.
+default = ["fake"]
+fake = ["dep:adjourn-contract", "dep:adjourn-delegate"]
+
+[dependencies]
+adjourn-core.workspace = true
+adjourn-contract = { workspace = true, optional = true }
+adjourn-delegate = { workspace = true, optional = true }
+freenet-stdlib.workspace = true
+ciborium.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+bs58.workspace = true
+anyhow.workspace = true
+ed25519-dalek.workspace = true
+shakmaty.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
