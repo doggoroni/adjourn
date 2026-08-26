@@ -1,0 +1,57 @@
+[package]
+name = "adjourn-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# `default-features = false` drops the `fake` feature, and with it the
+# contract and delegate crates. They must not enter this wasm build.
+#
+# A direct path dependency, not `adjourn-client.workspace = true` with an
+# override: cargo 1.97.1 silently ignores a member's `default-features`
+# override on a `workspace = true` dependency (it warns "this could become a
+# hard error in the future" and resolves with defaults on regardless).
+# Verified with
+# `cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e normal`, which
+# showed adjourn-contract and adjourn-delegate in the graph until this was
+# changed to a path dependency. `-e normal` is load-bearing, and in the
+# opposite direction to the obvious guess (measured, not assumed): it prints
+# ONLY the graph that actually ships, so it is unaffected by dev-dependencies
+# -- restoring an `adjourn-client` dev-dep leaves the output at 0 hits, because
+# `-e normal` drops the dev edge outright. The PLAIN `cargo tree` is the
+# misleading one here: a dev-dep on adjourn-client resolves with default
+# features, turning `fake` back on, so it prints the contract and the delegate
+# even when the shipping graph is clean. Use `-e normal` and it answers the
+# question the guard is actually asking. What it does catch is the regression
+# that matters: reverting this line to `workspace = true, default-features =
+# false` puts both crates back in the graph (measured, 2 hits). CI reruns this
+# command so that revert cannot pass unnoticed.
+adjourn-client = { path = "../client", default-features = false }
+adjourn-core.workspace = true
+# `net` is what provides the BROWSER WebApi on wasm. tokio and
+# tokio-tungstenite are gated to cfg(any(unix, windows)) upstream and are not
+# pulled here.
+freenet-stdlib = { workspace = true, features = ["net"] }
+dioxus = { version = "=0.7.9", features = ["web"] }
+# For `Closure` and `JsCast`, which `node.rs` needs to build the browser
+# `setTimeout` that bounds a request: there is no `tokio::time` here.
+wasm-bindgen = "=0.2.104"
+futures = "=0.3.34"
+web-sys = { version = "=0.3.81", features = [
+    "Window",
+    "Crypto",
+    "WebSocket",
+    "BinaryType",
+    "MessageEvent",
+    "ErrorEvent",
+] }
+anyhow.workspace = true
+shakmaty.workspace = true
+
+# Deliberately NO `adjourn-client` here: an integration test already sees the
+# package's normal dependencies, so it would buy nothing. It would not defeat
+# the `-e normal` check above -- that command ignores dev edges entirely -- but
+# it WOULD turn `fake`, and with it the contract and delegate crates, back on
+# for anyone running a plain `cargo tree` or `cargo test -p adjourn-ui`.
+[dev-dependencies]
+ed25519-dalek.workspace = true

@@ -30,6 +30,8 @@ concurrent writes are impossible rather than merely resolved.
 | `common/tests/adversarial.rs` | convergence attacks, outcome precedence, chess edges |
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter |
 | `delegates/adjourn-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
+| `client/src/session.rs` | transport-independent game flows (`adjourn-client`), shared by the CLI and the UI |
+| `ui/` | `adjourn-ui`: a Dioxus web frontend, compiled to `wasm32-unknown-unknown`. Compile-checked in CI only — see `CLAUDE.md`'s "UI" section for what is and is not tested |
 
 ## Five decisions worth keeping
 
@@ -83,7 +85,7 @@ fire on their own.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 140 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 15 adjourn-client)
+cargo test --workspace --locked     # 161 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 16 adjourn-client + 20 adjourn-ui)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
 
@@ -142,6 +144,12 @@ and a sync summary is exactly 64 bytes per record.
      confirmed against a live node so far. `watch` has no automated test
      against a real node — the mechanism is covered by
      `client/tests/updates.rs` against `FakeNode` only.
+   - 3d. Browser frontend — `ui/` (`adjourn-ui`), a Dioxus web UI over the
+     same `adjourn-client` flows: a pure board projection and a browser
+     `NodeClient` impl. It compiles for `wasm32-unknown-unknown` and is
+     compile-checked in CI; **it has never been loaded in an actual browser**
+     — `dx`, the Dioxus CLI, is not installed anywhere in this environment.
+     See `CLAUDE.md`'s "UI" section for exactly what is and is not tested.
 
 Deferred by design: timers, matchmaking, ratings.
 
