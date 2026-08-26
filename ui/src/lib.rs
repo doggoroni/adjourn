@@ -12,12 +12,12 @@ pub mod node;
 /// The compiled contract, embedded because a browser cannot read it off disk.
 ///
 /// This pins the contract key into the bundle: rebuilding the contract means
-/// rebuilding the UI. See `ui/build.rs` for the guard that says so when the
-/// artifact is missing.
-pub const CONTRACT_WASM: &[u8] =
-    include_bytes!("../../target/wasm32-unknown-unknown/release/adjourn_contract.wasm");
+/// rebuilding the UI. `ui/build.rs` locates the artifact -- honouring
+/// `CARGO_TARGET_DIR`, which a hardcoded `../../target/...` here would ignore
+/// -- and passes the absolute path through as `ADJOURN_CONTRACT_WASM`. It is
+/// also the guard that says what to run when the artifact is missing.
+pub const CONTRACT_WASM: &[u8] = include_bytes!(env!("ADJOURN_CONTRACT_WASM"));
 
 /// The compiled delegate, embedded for the same reason. The UI registers it on
 /// first run -- the browser's equivalent of `adjourn init`.
-pub const DELEGATE_WASM: &[u8] =
-    include_bytes!("../../target/wasm32-unknown-unknown/release/adjourn_delegate.wasm");
+pub const DELEGATE_WASM: &[u8] = include_bytes!(env!("ADJOURN_DELEGATE_WASM"));

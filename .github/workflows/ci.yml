@@ -35,11 +35,20 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked
-
-      # These two build steps MUST precede `Test`, not follow it. Several CLI
-      # integration tests (`cli/tests/common/mod.rs::contract_wasm()`) read the
+      # These two build steps MUST precede BOTH `Clippy` and `Test`, not follow
+      # them. Two independent reasons, and only the second is obvious:
+      #
+      # `Clippy` runs build scripts, and `ui/build.rs` panics outright when the
+      # compiled contract and delegate WASM are absent -- the UI bundle embeds
+      # them, and a path that silently resolves to nothing is worse than a loud
+      # failure. On a cold runner (a cache miss is guaranteed on any branch
+      # that churns `Cargo.lock`) a `Clippy` placed above these steps fails
+      # before anything has built them. This is the same class of bug as the
+      # `Test` ordering below; adding the `ui` crate is what made `Clippy`
+      # artifact-dependent too.
+      #
+      # And `Test`: several CLI integration tests
+      # (`cli/tests/common/mod.rs::contract_wasm()`) read the
       # compiled contract WASM off disk and silently skip themselves — printing
       # "skipping" and returning `Ok` — when the file is missing. A skipped
       # test reports the same `ok` as a passing one, so if the WASM were built
@@ -74,8 +83,9 @@ jobs:
             exit 1
           fi
 
-      # Same reasoning as the contract build above: must precede `Test` so the
-      # CLI tests that need the delegate WASM do not silently skip.
+      # Same reasoning as the contract build above: must precede `Clippy` so
+      # `ui/build.rs` finds it, and `Test` so the CLI tests that need the
+      # delegate WASM do not silently skip.
       - name: Build delegate WASM (canonical)
         run: ./scripts/build-delegate.sh
 
@@ -90,6 +100,10 @@ jobs:
             exit 1
           fi
 
+      # Below the WASM builds on purpose: see the block comment above them.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
       # `adjourn-client` exists SOLELY to be reachable from a browser, so a
       # version of it that does not compile for the browser's target is not
       # doing its job. A native `--no-default-features` check cannot catch
@@ -100,6 +114,24 @@ jobs:
 
       - name: Assert the UI compiles for the browser
         run: cargo check -p adjourn-ui --target wasm32-unknown-unknown --locked
+
+      # `adjourn-ui` must not reach the contract or the delegate: they are
+      # wasmtime modules the UI EMBEDS as bytes, not crates it links. This is
+      # the command `ui/Cargo.toml` cites as proof, run for real. `-e normal`
+      # is load-bearing -- dev-dependencies resolve with default features, so a
+      # single dev-dep on `adjourn-client` turns its `fake` feature back on and
+      # puts both crates in the graph. Without this step, reverting the
+      # path-dependency workaround would be undetectable by the documented
+      # procedure.
+      - name: Assert the UI graph excludes the contract and the delegate
+        run: |
+          graph=$(cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e normal --locked)
+          for crate in adjourn-contract adjourn-delegate; do
+            if echo "$graph" | grep -q "$crate"; then
+              echo "$crate reached adjourn-ui's normal dependency graph; the UI embeds it as bytes and must not link it"
+              exit 1
+            fi
+          done
 
       - name: Test
         run: cargo test --workspace --locked

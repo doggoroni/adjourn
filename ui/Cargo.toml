@@ -11,9 +11,14 @@ edition.workspace = true
 # override: cargo 1.97.1 silently ignores a member's `default-features`
 # override on a `workspace = true` dependency (it warns "this could become a
 # hard error in the future" and resolves with defaults on regardless).
-# Verified with `cargo tree -p adjourn-ui --target wasm32-unknown-unknown`,
-# which showed adjourn-contract and adjourn-delegate in the graph until this
-# was changed to a path dependency.
+# Verified with
+# `cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e normal`, which
+# showed adjourn-contract and adjourn-delegate in the graph until this was
+# changed to a path dependency. `-e normal` is load-bearing: dev-dependencies
+# resolve with default features on, so ANY dev-dep on adjourn-client puts the
+# contract and delegate back into the printed graph and destroys this check's
+# ability to tell the guarded state from the broken one. There is no such
+# dev-dep, and the CI step that reruns this command is what keeps it that way.
 adjourn-client = { path = "../client", default-features = false }
 adjourn-core.workspace = true
 # `net` is what provides the BROWSER WebApi on wasm. tokio and
@@ -21,8 +26,9 @@ adjourn-core.workspace = true
 # pulled here.
 freenet-stdlib = { workspace = true, features = ["net"] }
 dioxus = { version = "=0.7.9", features = ["web"] }
+# For `Closure` and `JsCast`, which `node.rs` needs to build the browser
+# `setTimeout` that bounds a request: there is no `tokio::time` here.
 wasm-bindgen = "=0.2.104"
-wasm-bindgen-futures = "=0.4.54"
 futures = "=0.3.34"
 web-sys = { version = "=0.3.81", features = [
     "Window",
@@ -32,10 +38,13 @@ web-sys = { version = "=0.3.81", features = [
     "MessageEvent",
     "ErrorEvent",
 ] }
-ciborium.workspace = true
 anyhow.workspace = true
 shakmaty.workspace = true
 
+# Deliberately NO `adjourn-client` here. An integration test already sees the
+# package's normal dependencies, so it would buy nothing -- and a workspace
+# dev-dep resolves with default features, which turns `fake` back on and pulls
+# the contract and delegate into the graph the comment above tells you to
+# check.
 [dev-dependencies]
-adjourn-client.workspace = true
 ed25519-dalek.workspace = true

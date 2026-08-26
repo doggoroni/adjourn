@@ -9,7 +9,7 @@ Untimed correspondence chess as a Freenet decentralized app.
 | `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
 | `client/` (`adjourn-client`) | the game flows (`session.rs`, `invite.rs`), transport-independent — generic over `node::NodeClient` rather than tied to any one WebSocket implementation. `FakeNode` (real contract and delegate code, in-memory transport) lives here too, behind a default-on `fake` feature the UI turns off. |
 | `cli/` (`adjourn-cli`) | the `adjourn` headless CLI: the tungstenite `NodeClient` impl (`ws.rs`), argument parsing, and rendering. It drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`/`watch` by calling into `adjourn_client::session`; it no longer holds the flows itself. The one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently) — otherwise `main.rs` is parse-dispatch-render only. |
-| `ui/` (`adjourn-ui`) | the Dioxus web UI. `board.rs` is a pure projection of `adjourn_core::project`'s output onto squares (never touches the network); `node.rs` is the browser `NodeClient` impl. Depends on `adjourn-client` with `default-features = false` so the contract and delegate crates — and their WASM toolchains — never enter the wasm build. The bundle `include_bytes!`s both compiled WASM modules directly, because a browser cannot read them off disk at runtime the way the CLI reads them off disk at startup — which pins both the contract's and the delegate's keys into whatever build of the UI you ship. |
+| `ui/` (`adjourn-ui`) | the Dioxus web UI. `board.rs` is a pure projection of `adjourn_core::project`'s output onto squares (never touches the network); `node.rs` is the browser `NodeClient` impl. Depends on `adjourn-client` with `default-features = false` so the contract and delegate crates — and their WASM toolchains — never enter the wasm build. The library `include_bytes!`s both compiled WASM modules directly (and the bundle will, once the views land — `ui/src/main.rs` does not yet reference `adjourn_ui`), because a browser cannot read them off disk at runtime the way the CLI reads them off disk at startup — which pins both the contract's and the delegate's keys into whatever build of the UI you ship. |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -476,6 +476,10 @@ also has to be read per-implementation: `Ok(None)` means "nothing waiting" for
 `FakeNode`, which drains a finite in-memory log, but `WsClient` blocks on the
 socket's `recv()` and has no such log to exhaust, so for a real node this call
 either yields an update or does not return — it can never produce `None`.
+`BrowserClient` is the exception that makes the contract real: its error
+handler pushes a `Frame::Closed` on `onerror`/`onclose`, so `next_update` there
+returns `Ok(None)` to mean "the socket is gone, no update will ever arrive".
+See "UI" below.
 
 `watch` has no automated test against a real node.
 `client/tests/updates.rs::watch_label_reports_the_opponents_move` drives
@@ -617,11 +621,18 @@ workspace default for `adjourn-client` is `fake` **on** (so `cargo test
 --workspace` works with no extra flags), and `fake` pulls in
 `adjourn-contract` and `adjourn-delegate` — exactly the crates and WASM
 toolchains this crate exists to keep out of the browser bundle. This was
-caught with `cargo tree -p adjourn-ui --target wasm32-unknown-unknown`, not
-assumed: the contract and delegate showed up in the graph until
+caught with `cargo tree -p adjourn-ui --target wasm32-unknown-unknown -e
+normal`, not assumed: the contract and delegate showed up in the graph until
 `ui/Cargo.toml` was changed to a direct `path` dependency
 (`adjourn-client = { path = "../client", default-features = false }`), which
-cargo does honor. Every other crate in this workspace depends on its siblings
+cargo does honor. `-e normal` is not decoration. Dev-dependencies resolve with
+default features regardless, so a single `adjourn-client` dev-dep in
+`ui/Cargo.toml` puts `fake` — and the contract and delegate — back into the
+printed graph, and the check can no longer tell the guarded state from the
+broken one. There is deliberately no such dev-dep (an integration test already
+sees the package's normal dependencies), and CI's "Assert the UI graph excludes
+the contract and the delegate" step runs this same command so a revert cannot
+pass unnoticed. Every other crate in this workspace depends on its siblings
 via `workspace = true`; `ui/Cargo.toml`'s deviation looks like an
 inconsistency an editor should "fix." It is the one dependency in the
 workspace where `workspace = true` silently does the wrong thing, and it is
@@ -668,24 +679,58 @@ take-once `oneshot` sender across all three callbacks: whichever fires first
 resolves the future, and a later callback firing on an already-taken sender
 is a harmless no-op rather than a panic on a repeat send.
 
+**The error handler stays live for the client's lifetime, and every failure
+becomes a `Frame`.** The take-once sender above solves `connect` and nothing
+else: an error handler that goes quiet once connect resolves swallows every
+later `onerror` and `onclose`, which is every way a socket can die. And the
+inbox cannot signal the death by ending, because `freenet-stdlib` `forget()`s
+its onmessage closure (`client_api/browser.rs` ~125) — the sender is leaked,
+so `inbox.next()` never returns `None` and any "connection closed" arm written
+against it is unreachable dead code. So the handler does two jobs: resolve
+`connect` at most once, and *always* push a `Frame::Closed` into the same
+inbox the responses arrive on.
+
+That inbox carries `Frame`, not `HostResponse`, and that is the second half.
+`WebApi`'s result handler takes `Result<HostResponse, ClientError>` — the node
+reports per-request failures (a rejected `Update`, a contract execution error,
+an `ApplicationMessages` against an unbound key) through the `Err` side. An
+`if let Ok(resp)` there drops all of them, and the waiting request never wakes:
+a rejected move spins forever, looking exactly like a healthy idle
+correspondence game. `route` therefore classifies four cases, not two —
+`Response`, `Notification`, `Failed`, `Closed` — and it is ungated and pure, so
+all four are unit-tested off-wasm.
+
+**`BrowserClient` bounds a request with `setTimeout`, mirroring
+`cli/src/ws.rs`.** Same 30-second `RESPONSE_TIMEOUT`, same "name the operation
+that hung" error style, and the same deliberate exemption for `next_update` —
+see the asymmetry documented under "Client" above. There is no `tokio::time`
+on this target, so the timer is a `web_sys` `setTimeout` wrapped as a future;
+that is the only reason `wasm-bindgen` is a direct dependency of this crate.
+The `Closure` is held by the future and the handle is cleared on drop, so a
+request that answers in time leaves no pending callback and no leak.
+
 **Coverage, stated plainly rather than left to the workspace total to
 imply.** Nothing in this crate has ever been loaded in a browser. `dx` (the
 Dioxus CLI) is not installed anywhere in this environment, and no task in
 this branch installed it — the wasm build is compile-checked in CI and
 nothing more. `board.rs` has 8 tests, all run natively, all pure-function
-tests with no network and no DOM. `node.rs`'s `route` has 3 tests, also
-native, also pure. `BrowserClient` — the socket wiring, the request/response
-round trip against a real `WebApi`, and `register_delegate`'s ordering — has
-**no automated test at all**; it is verified by source-reading and
-compilation only. The workspace test count below includes the 11 tests in
-this crate; do not read that number as browser coverage.
+tests with no network and no DOM. `node.rs`'s `route` has 6 tests, also
+native, also pure — including the two failure classifications, which were
+pulled out from under the wasm gate precisely so they could be tested.
+`BrowserClient` — the socket wiring, the request/response round trip against a
+real `WebApi`, `register_delegate`'s ordering, the `setTimeout` that bounds a
+request, and that the error handler really does keep firing after connect —
+has **no automated test at all**; those need a live browser and a live socket,
+and are verified by source-reading and compilation only. The workspace test
+count below includes the 14 tests in this crate; do not read that number as
+browser coverage.
 
 ## Testing
 
-`cargo test --workspace --locked` — 152 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 155 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
-9 delegate adapter tests, 16 `adjourn-client` integration tests, and 11
-`adjourn-ui` tests (8 board, 3 routing — see "UI" above for what that number
+9 delegate adapter tests, 16 `adjourn-client` integration tests, and 14
+`adjourn-ui` tests (8 board, 6 routing — see "UI" above for what that number
 does and does not cover). The algebra tests are the point; they run randomized
 partitions and delivery orders. Keep them green. New state-shape features need
 a corresponding law test, not just a happy-path test.
@@ -726,12 +771,18 @@ a corresponding law test, not just a happy-path test.
   themselves if it is absent locally -- but panic instead if `CI` is set, so a
   skip can never masquerade as a pass in CI (see
   `client/tests/common/mod.rs::contract_wasm`).
-- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (3) — both run natively,
+- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (6) — both run natively,
   not on wasm: the opening position and its mirror for Black, square
   selection and legal-move highlighting, promotion detection on both back
   ranks, and (`routing.rs`) that `route` tells a response from an update
-  notification and never confuses the two. Both are pure-function tests with
-  no socket and no DOM in the loop. This is the entire automated test surface
+  notification and never confuses the two, that a node-reported `Err` frame
+  routes to `Failed` rather than being dropped, and that a socket close routes
+  to `Closed`. Those last three are the transport's error paths pulled out as
+  a pure function precisely so they are testable off-wasm — the same move
+  `route` itself was extracted for. What still needs a real browser, and has
+  no coverage: `connect`, the `setTimeout` that bounds a request, and that the
+  error handler actually keeps firing after connect. Both files are
+  pure-function tests with no socket and no DOM in the loop. This is the entire automated test surface
   for `adjourn-ui` — see "UI" above for what it deliberately does not reach.
 
 ### Check against the network's own verifier

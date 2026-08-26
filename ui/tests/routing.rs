@@ -1,7 +1,7 @@
 use adjourn_client::node::contract_container;
 use adjourn_core::GameParams;
-use adjourn_ui::node::{route, Routed};
-use freenet_stdlib::client_api::{ContractResponse, HostResponse};
+use adjourn_ui::node::{route, Frame, Routed};
+use freenet_stdlib::client_api::{ClientError, ContractResponse, ErrorKind, HostResponse};
 use freenet_stdlib::prelude::*;
 
 /// A real `ContractKey`, taken from a real container.
@@ -21,13 +21,17 @@ fn a_key() -> ContractKey {
     container.key()
 }
 
+fn ok(resp: HostResponse) -> Frame {
+    Frame::Result(Ok(resp))
+}
+
 #[test]
 fn an_update_notification_is_routed_as_a_notification() {
     let resp = HostResponse::ContractResponse(ContractResponse::UpdateNotification {
         key: a_key(),
         update: UpdateData::State(State::from(vec![1, 2, 3])),
     });
-    match route(resp) {
+    match route(ok(resp)) {
         Routed::Notification(id, UpdateData::State(bytes)) => {
             assert_eq!(id, *a_key().id());
             assert_eq!(bytes.as_ref(), &[1, 2, 3]);
@@ -38,7 +42,7 @@ fn an_update_notification_is_routed_as_a_notification() {
 
 #[test]
 fn an_ordinary_response_is_routed_as_a_response() {
-    match route(HostResponse::Ok) {
+    match route(ok(HostResponse::Ok)) {
         Routed::Response(HostResponse::Ok) => {}
         other => panic!("expected a response, got {other:?}"),
     }
@@ -53,8 +57,48 @@ fn a_notification_is_never_mistaken_for_a_response() {
         update: UpdateData::Delta(StateDelta::from(vec![4, 5])),
     });
     assert!(
-        !matches!(route(resp), Routed::Response(_)),
+        !matches!(route(ok(resp)), Routed::Response(_)),
         "a notification routed as a response would be consumed by whichever \
          request happened to be waiting, and lost"
     );
+}
+
+/// The node reports per-request failures -- a rejected `Update`, a contract
+/// execution error -- through the `Err` side of the handler's argument. An
+/// earlier version matched `if let Ok(resp)` and dropped them, so the waiting
+/// request never woke: a rejected move spun forever with no error anywhere.
+#[test]
+fn a_node_reported_error_is_routed_as_a_failure() {
+    let frame = Frame::Result(Err(ClientError::from(ErrorKind::OperationError {
+        cause: "the contract refused the update".into(),
+    })));
+    match route(frame) {
+        Routed::Failed(why) => assert!(
+            why.contains("the contract refused the update"),
+            "the failure must carry the node's own words, got {why:?}"
+        ),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+/// A failure is not a response. If it routed as one, the request loop would
+/// fall through to its `unexpected response` arm at best, and at worst be
+/// swallowed by a `{}` skip arm -- back to hanging.
+#[test]
+fn a_failure_is_never_mistaken_for_a_response_or_a_notification() {
+    let frame = Frame::Result(Err(ClientError::from(ErrorKind::NodeUnavailable)));
+    assert!(matches!(route(frame), Routed::Failed(_)));
+}
+
+/// `onerror` and `onclose` both land in the error handler, which synthesises
+/// this frame. It has to route to its own arm: `next_response` turns it into
+/// an error, and `next_update` into `Ok(None)`. Before, both of those arms
+/// were unreachable dead code, because freenet-stdlib `forget()`s the
+/// onmessage closure and so the inbox never ends.
+#[test]
+fn a_closed_socket_is_routed_as_closed() {
+    match route(Frame::Closed("connection closed".into())) {
+        Routed::Closed(why) => assert_eq!(why, "connection closed"),
+        other => panic!("expected a close, got {other:?}"),
+    }
 }

@@ -77,14 +77,12 @@ dependencies = [
  "adjourn-client",
  "adjourn-core",
  "anyhow",
- "ciborium",
  "dioxus",
  "ed25519-dalek",
  "freenet-stdlib",
  "futures",
  "shakmaty",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
 ]
 

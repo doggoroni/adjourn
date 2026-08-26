@@ -48,9 +48,10 @@ fn uci_of(file: char, rank: u8) -> String {
 /// Black reads h1 first.
 ///
 /// `selected` marks that square and every square a legal move from it can
-/// reach. The legal moves come from `legal_moves`, the same function the CLI
-/// uses, so the browser cannot disagree with the projection about what is
-/// playable.
+/// reach, via `legal_moves_for` -- a deliberate duplicate of
+/// `common/src/project.rs`'s `legal_moves`, NOT a shared call. See that
+/// function's own note for why, and for the standing obligation to keep the
+/// two in step by hand.
 pub fn squares(status: &Status, orientation: Color, selected: Option<(char, u8)>) -> Vec<Square> {
     let pos = position_of(status);
 
@@ -108,9 +109,20 @@ pub fn squares(status: &Status, orientation: Color, selected: Option<(char, u8)>
     out
 }
 
-/// `legal_moves` takes the state, but a rendered board only has the `Status`.
-/// Re-deriving from the FEN keeps the board a pure function of what it is
-/// handed.
+/// The legal moves in `status`'s position.
+///
+/// This is a hand copy of `adjourn_core::project::legal_moves` (both FEN-parse
+/// then ask shakmaty), and the duplication is deliberate rather than
+/// accidental: `legal_moves` takes the whole state, while [`squares`] is
+/// handed only a `&Status`, which is what keeps the board a pure function of
+/// what it renders. Factoring the shared half into `adjourn-core` was
+/// considered and REJECTED -- that crate compiles into the contract, so a new
+/// public item there rotates the contract key and orphans every game in
+/// progress. Two lines of shakmaty are not worth that.
+///
+/// The obligation this leaves: if move generation ever changes -- a different
+/// `CastlingMode`, a different UCI spelling -- change it in BOTH places, or
+/// the browser will disagree with the projection about what is playable.
 fn legal_moves_for(status: &Status) -> Vec<String> {
     let Some(pos) = position_of(status) else {
         return Vec::new();
@@ -126,6 +138,12 @@ fn legal_moves_for(status: &Status) -> Vec<String> {
 /// The picker must appear for this move and only this move: a UI that always
 /// queens cannot play some legal games, and underpromotion is already
 /// supported by the algebra.
+///
+/// Answers a question about the PIECE, not about the move: it checks neither
+/// legality nor side to move, so it says `true` for a black pawn's promotion
+/// while White is to play. Callers must therefore only ask about a `to` square
+/// that [`squares`] has already marked [`Marker::LegalTarget`] for this `from`
+/// -- that is where legality and turn are decided.
 pub fn is_promotion(status: &Status, from: (char, u8), to: (char, u8)) -> bool {
     let Some(pos) = position_of(status) else {
         return false;
