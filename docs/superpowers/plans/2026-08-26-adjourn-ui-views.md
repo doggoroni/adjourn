@@ -588,7 +588,10 @@ pub mod conn;
 pub mod views;
 ```
 
-The bring-up page's board rendering moves into `views/game.rs` in Task 4; delete `ui/src/live.rs` and its `lib.rs` declaration **only after** Task 2 compiles, since the shell replaces what it demonstrated.
+Delete `ui/src/live.rs` and its `pub mod live;` line in this task. It
+demonstrated the transport before any screen existed, and `main.rs` — which
+this step replaces — was its only consumer. Task 4 does NOT delete it; this is
+the only place it is removed.
 
 - [ ] **Step 5: Verify**
 
@@ -609,6 +612,8 @@ git commit -m "feat(ui): connection actor and app shell"
 
 **Files:**
 - Create: `ui/src/views/list.rs`, `ui/src/views/setup.rs`
+- Modify: `ui/src/views/mod.rs` (add `pub mod list;` and `pub mod setup;`)
+- Modify: `ui/src/app.rs` (replace the placeholder arms for `List`, `New` and `Accept`)
 
 **Interfaces:**
 - Consumes: `Wires`, `Cmd`, `Screen`.
@@ -800,11 +805,32 @@ pub fn AcceptInvite(wires: Wires) -> Element {
 }
 ```
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Wire the screens in**
+
+Add to `ui/src/views/mod.rs`:
+
+```rust
+pub mod list;
+pub mod setup;
+```
+
+And in `ui/src/app.rs`, replace Task 2's placeholder arm — which currently
+covers `List | New | Accept | Game(_)` — with the real ones, leaving `Game`
+on the placeholder until Task 4:
+
+```rust
+                Screen::List => rsx! { crate::views::list::GameList { wires, screen } },
+                Screen::New => rsx! { crate::views::setup::NewGame { wires } },
+                Screen::Accept => rsx! { crate::views::setup::AcceptInvite { wires } },
+                Screen::Game(_) => rsx! { p { class: "hint", "the game screen lands in Task 4" } },
+                Screen::Settings => rsx! { crate::views::settings::Settings { node_url } },
+```
+
+- [ ] **Step 4: Verify**
 
 Both build directions, the suite, `fmt`, clippy. Then build, serve, and with a node running create an invite — confirm a blob appears and no error banner. Report what you saw.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -817,8 +843,9 @@ git commit -m "feat(ui): game list and the invite exchange screens"
 
 **Files:**
 - Create: `ui/src/views/game.rs`
+- Modify: `ui/src/views/mod.rs` (add `pub mod game;`)
+- Modify: `ui/src/app.rs` (replace the placeholder arm for `Game(label)`)
 - Modify: `ui/index.html` (styles for the two-column layout and the promotion picker)
-- Delete: `ui/src/live.rs` and its `lib.rs` declaration
 
 **Interfaces:**
 - Consumes: `Wires`, `Cmd`, `board::{squares, is_promotion, Marker, Shade, Square}`, `session::moves_in_order`.
@@ -1060,9 +1087,14 @@ In `ui/index.html`'s `<style>` block, add — keeping the existing board and pie
 @media (max-width: 40rem) { .game { grid-template-columns: 1fr; } }
 ```
 
-- [ ] **Step 4: Delete the bring-up module**
+- [ ] **Step 4: Wire the screen in**
 
-`ui/src/live.rs` demonstrated the transport before any screen existed; the connection actor supersedes it. Delete the file and its `pub mod live;` line.
+Add `pub mod game;` to `ui/src/views/mod.rs`, and in `ui/src/app.rs` replace the
+`Game` placeholder with the real screen:
+
+```rust
+                Screen::Game(label) => rsx! { crate::views::game::GameScreen { wires, label } },
+```
 
 - [ ] **Step 5: Verify**
 
@@ -1178,7 +1210,11 @@ In `ui/Cargo.toml`:
 ```toml
 [dev-dependencies]
 ed25519-dalek.workspace = true
-wasm-bindgen-test = "=0.3.54"
+# Pin the version that resolves against the workspace's `wasm-bindgen 0.2.104`
+# -- these two track each other, and a mismatch fails at link time with an
+# unhelpful message. Add it with `cargo add --dev wasm-bindgen-test -p adjourn-ui`,
+# then pin the exact version it chose with `=`, matching every other pin in this
+# repo. Record which version landed in your report.
 ```
 
 **Do not add `adjourn-client` here.** It re-enables the `fake` feature and puts the contract and delegate back into the graph the documented `cargo tree ... -e normal` check reads — which is how that guard lost its ability to tell the guarded state from the broken one once already.
