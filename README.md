@@ -31,7 +31,7 @@ concurrent writes are impossible rather than merely resolved.
 | `contracts/adjourn-contract/` | the `ContractInterface` adapter |
 | `delegates/adjourn-delegate/` | holds the per-game signing key; enforces one signature per (game, ply) |
 | `client/src/session.rs` | transport-independent game flows (`adjourn-client`), shared by the CLI and the UI |
-| `ui/` | `adjourn-ui`: a Dioxus web frontend, compiled to `wasm32-unknown-unknown`. Compile-checked in CI only — see `CLAUDE.md`'s "UI" section for what is and is not tested |
+| `ui/` | `adjourn-ui`: a Dioxus web frontend, compiled to `wasm32-unknown-unknown`, built and run against a live local `freenet` node with `dx` 0.7.9. Compile-checked in CI; two browser tests exist but are not — see `CLAUDE.md`'s "UI" section for what is and is not tested |
 
 ## Five decisions worth keeping
 
@@ -85,9 +85,14 @@ fire on their own.
 ## Verified
 
 ```
-cargo test --workspace --locked     # 161 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 16 adjourn-client + 20 adjourn-ui)
+cargo test --workspace --locked     # 168 tests (99 adjourn-core + 17 contract + 9 delegate adapter + 21 adjourn-client + 22 adjourn-ui)
 ./scripts/build-contract.sh         # the canonical contract WASM
 ```
+
+That count does not include `ui/tests/browser.rs`'s 2 `wasm-bindgen-test`
+cases — they compile to nothing under a native `cargo test` and only run
+under `wasm-pack test --headless --firefox`, against a live node. See
+`CLAUDE.md`'s "UI" section.
 
 Build the contract **only** through that script: it applies the
 `--remap-path-prefix` flags that keep the WASM — and therefore the contract key
@@ -145,11 +150,17 @@ and a sync summary is exactly 64 bytes per record.
      against a real node — the mechanism is covered by
      `client/tests/updates.rs` against `FakeNode` only.
    - 3d. Browser frontend — `ui/` (`adjourn-ui`), a Dioxus web UI over the
-     same `adjourn-client` flows: a pure board projection and a browser
-     `NodeClient` impl. It compiles for `wasm32-unknown-unknown` and is
-     compile-checked in CI; **it has never been loaded in an actual browser**
-     — `dx`, the Dioxus CLI, is not installed anywhere in this environment.
-     See `CLAUDE.md`'s "UI" section for exactly what is and is not tested.
+     same `adjourn-client` flows: a pure board projection, a browser
+     `NodeClient` impl, a connection actor, and the game/list/setup/settings
+     screens. It compiles for `wasm32-unknown-unknown` and is compile-checked
+     in CI. It has now been built with `dx` 0.7.9 and driven against a live
+     local `freenet` node — connecting, listing games, opening a game, and
+     playing a move all work — and `ui/tests/browser.rs` adds two
+     browser-only tests, not wired into CI. Still unverified: the cross-peer
+     live-update path, since a pair of `freenet local` nodes does not peer
+     (see `docs/runbook-two-nodes.md` and `CLAUDE.md`'s "Runtime assumptions,
+     verified"). See `CLAUDE.md`'s "UI" section for exactly what is and is
+     not tested.
 
 Deferred by design: timers, matchmaking, ratings.
 

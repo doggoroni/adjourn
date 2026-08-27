@@ -557,13 +557,9 @@ mod browser {
                 }))
                 .await
                 .map_err(|e| anyhow!("sending Put: {e}"))?;
-            loop {
-                match self.next_response("Put").await? {
-                    HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => {
-                        return Ok(())
-                    }
-                    other => bail!("unexpected response to Put: {other:?}"),
-                }
+            match self.next_response("Put").await? {
+                HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => Ok(()),
+                other => bail!("unexpected response to Put: {other:?}"),
             }
         }
 
@@ -575,13 +571,9 @@ mod browser {
                 }))
                 .await
                 .map_err(|e| anyhow!("sending Update: {e}"))?;
-            loop {
-                match self.next_response("Update").await? {
-                    HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => {
-                        return Ok(())
-                    }
-                    other => bail!("unexpected response to Update: {other:?}"),
-                }
+            match self.next_response("Update").await? {
+                HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => Ok(()),
+                other => bail!("unexpected response to Update: {other:?}"),
             }
         }
 
@@ -602,20 +594,17 @@ mod browser {
                 ))
                 .await
                 .map_err(|e| anyhow!("sending delegate call: {e}"))?;
-            loop {
-                match self.next_response("delegate call").await? {
-                    HostResponse::DelegateResponse { values, .. } => {
-                        for msg in values {
-                            if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
-                                return Response::decode(&app.payload).map_err(|e| {
-                                    anyhow!("delegate sent an undecodable reply: {e:?}")
-                                });
-                            }
+            match self.next_response("delegate call").await? {
+                HostResponse::DelegateResponse { values, .. } => {
+                    for msg in values {
+                        if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
+                            return Response::decode(&app.payload)
+                                .map_err(|e| anyhow!("delegate sent an undecodable reply: {e:?}"));
                         }
-                        bail!("delegate returned no application message")
                     }
-                    other => bail!("unexpected response to delegate call: {other:?}"),
+                    bail!("delegate returned no application message")
                 }
+                other => bail!("unexpected response to delegate call: {other:?}"),
             }
         }
 

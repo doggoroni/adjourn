@@ -68,6 +68,23 @@ commands below to PowerShell as needed; the `freenet` flags are the same.)
 
 ## 2. Start the two nodes
 
+**This runbook, as written, does NOT make the two nodes peer.** `freenet
+local` resolves `mode = "local"` in the config it generates — the binary's
+own `--help` describes this as "local-only mode... no real P2P" — so the two
+node processes below are fully isolated single-node instances, each with its
+own on-disk contract/delegate/db state, with no gateway or peer relationship
+between them. PUTting the same deterministic contract (same code, same
+`GameParams`) onto both gives each an independently-initialized copy, not a
+shared, synchronized one: a move signed against Alice's copy never reaches
+Bob's. This was confirmed while driving the UI against exactly this setup —
+see `CLAUDE.md`'s "Runtime assumptions, verified" — where playing a move
+advanced the acting node's own ply correctly while the other node's storage,
+checked directly, stayed unmoved. Section 4.5's "confirm the other side sees
+it" step below is therefore **not achievable with the setup as written**; it
+would need real peering (`freenet network --is-gateway ...` on one side,
+`freenet network --gateway "host:port,pubkey" ...` on the other), which is
+out of scope for this runbook.
+
 `freenet local` runs a node in local (no real P2P) mode. Each flag below is
 namespaced per node so the two can run on one machine without colliding:
 `--ws-api-port` for the client API, `--network-port` for the node's own
@@ -229,7 +246,10 @@ adjourn show --label bob   --node ws://127.0.0.1:7510/v1/contract/command?encodi
 
 should report the ply Alice just played, and vice versa — that is the proof
 state actually crossed the network through the contract rather than one side
-talking to itself.
+talking to itself. **As written, with two `freenet local` nodes and no
+gateway configuration, it will not**: see the note in section 2. Each
+`adjourn show` here reports only the state already on that node's own
+storage.
 
 ### 4.6 Confirm the result
 

@@ -9,7 +9,7 @@ Untimed correspondence chess as a Freenet decentralized app.
 | `delegates/adjourn-delegate/` | holds per-game signing keys; enforces one signature per (game, ply). |
 | `client/` (`adjourn-client`) | the game flows (`session.rs`, `invite.rs`), transport-independent — generic over `node::NodeClient` rather than tied to any one WebSocket implementation. `FakeNode` (real contract and delegate code, in-memory transport) lives here too, behind a default-on `fake` feature the UI turns off. |
 | `cli/` (`adjourn-cli`) | the `adjourn` headless CLI: the tungstenite `NodeClient` impl (`ws.rs`), argument parsing, and rendering. It drives `key`/`invite`/`game`/`move`/`show`/`resign`/`draw`/`watch` by calling into `adjourn_client::session`; it no longer holds the flows itself. The one exception is `ListGames`, which `main.rs` sends directly (it backs both `key list` and `game list`, which render it differently) — otherwise `main.rs` is parse-dispatch-render only. |
-| `ui/` (`adjourn-ui`) | the Dioxus web UI. `board.rs` is a pure projection of `adjourn_core::project`'s output onto squares (never touches the network); `node.rs` is the browser `NodeClient` impl. Depends on `adjourn-client` with `default-features = false` so the contract and delegate crates — and their WASM toolchains — never enter the wasm build. The library `include_bytes!`s both compiled WASM modules directly (and the bundle will, once the views land — `ui/src/main.rs` does not yet reference `adjourn_ui`), because a browser cannot read them off disk at runtime the way the CLI reads them off disk at startup — which pins both the contract's and the delegate's keys into whatever build of the UI you ship. |
+| `ui/` (`adjourn-ui`) | the Dioxus web UI. `board.rs` is a pure projection of `adjourn_core::project`'s output onto squares (never touches the network); `node.rs` is the browser `NodeClient` impl; `conn.rs` is the single coroutine that owns that client and serialises every command a screen sends; `app.rs`/`views/` are the shell and the four screens. Depends on `adjourn-client` with `default-features = false` so the contract and delegate crates — and their WASM toolchains — never enter the wasm build. The library `include_bytes!`s both compiled WASM modules directly (`ui/src/main.rs` calls `dioxus::launch(adjourn_ui::app::App)`), because a browser cannot read them off disk at runtime the way the CLI reads them off disk at startup — which pins both the contract's and the delegate's keys into whatever build of the UI you ship. |
 
 `validate_state` → `all_valid`, `update_state` → `merge`, `summarize_state` →
 `summarize`, `get_state_delta` → `delta_against`.
@@ -687,6 +687,21 @@ take-once `oneshot` sender across all three callbacks: whichever fires first
 resolves the future, and a later callback firing on an already-taken sender
 is a harmless no-op rather than a panic on a repeat send.
 
+**And `connect` is now bounded by `RESPONSE_TIMEOUT` too, closing a second,
+narrower hang the paragraph above does not.** Resolving on `onerror`/`onclose`
+closes the *refused*-connection case — the port is closed, the OS resets the
+connection, and `onclose` fires promptly. It does nothing for the SYN that is
+silently *dropped* rather than refused — a firewall, a VPN, a sandboxed CI
+network — where no `onerror`, no `onclose`, and no `onopen` ever fire, so
+nothing resolves the oneshot: the original hang, with a narrower trigger, and
+indistinguishable from the outside from a slow node. `connect` now races the
+same 30-second `RESPONSE_TIMEOUT` every request already uses; `next_update`
+remains the one deliberate exemption, since a correspondence move can take
+days but a TCP handshake cannot. Loopback refuses promptly, so the dead-port
+browser test below was passing on an assumption this fix makes explicit
+rather than incidental — before it, that test would have hung until the
+harness killed it on a drop-instead-of-refuse network, not failed cleanly.
+
 **The error handler stays live for the client's lifetime, and every failure
 becomes a `Frame`.** The take-once sender above solves `connect` and nothing
 else: an error handler that goes quiet once connect resolves swallows every
@@ -743,31 +758,173 @@ that is the only reason `wasm-bindgen` is a direct dependency of this crate.
 The `Closure` is held by the future and the handle is cleared on drop, so a
 request that answers in time leaves no pending callback and no leak.
 
-**Coverage, stated plainly rather than left to the workspace total to
-imply.** Nothing in this crate has ever been loaded in a browser. `dx` (the
-Dioxus CLI) is not installed anywhere in this environment, and no task in
-this branch installed it — the wasm build is compile-checked in CI and
-nothing more. `board.rs` has 8 tests, all run natively, all pure-function
-tests with no network and no DOM. `node.rs`'s `route` has 6 tests, also
-native, also pure — including the two failure classifications, which were
-pulled out from under the wasm gate precisely so they could be tested.
-`BrowserClient` — the socket wiring, the request/response round trip against a
-real `WebApi`, `register_delegate`'s ordering, the `setTimeout` that bounds a
-request, and that the error handler really does keep firing after connect —
-has **no automated test at all**; those need a live browser and a live socket,
-and are verified by source-reading and compilation only. The workspace test
-count below includes the 14 tests in this crate; do not read that number as
-browser coverage.
+**A live node answers a GET for a contract it has never seen with `Err`, not
+`Ok(None)` — and every transport, including this one, has to fold that one
+case back to `Ok(None)` itself.** `NodeClient::get`'s contract is "`Ok(None)`
+means the network does not have this contract yet." Against a real `freenet
+0.2.130` node, `game_bind`'s inviter path (GET, then PUT only if absent) hit
+`Err(ContractError::MissingContract)` instead, so the `?` propagated and the
+PUT never ran — against a real node the invite exchange could never complete.
+`BrowserClient::get` in `ui/src/node.rs` now has an explicit
+`Routed::ContractMissing` arm (alongside `cli/src/ws.rs`'s `WsClient::get`)
+that returns `Ok(None)` for exactly this case, classified on the typed
+`ErrorKind::RequestError(ContractError::MissingContract)` the node reports —
+never on the rendered error string, since a reworded upstream message must
+not silently stop matching, and folding some *other* failure into "absent"
+the same way would let a caller silently PUT over a live game's contract.
+`WsClient::get`'s own wiring of this classifier has no test — `cli/` has no
+`tests/` directory at all — so it is verified by reading only; the classifier
+itself (`is_missing_contract` in `client/src/node.rs`) has unit tests, and
+`ui/tests/routing.rs` covers the `ContractMissing` routing on this crate's
+side. No test through `FakeNode` could have caught the original bug: every
+existing test ran both players against one shared in-memory `World`, so the
+accepter's unconditional PUT had already populated the contract by the time
+the inviter's conditional GET looked, and the absent branch never ran at all.
+
+**An `include_bytes!` into a `const` costs zero bytes in the shipped wasm
+until something actually reads the bytes at runtime — and `.len()` does not
+count, because it const-folds.** `CONTRACT_WASM`/`DELEGATE_WASM` in
+`ui/src/lib.rs` are each an `include_bytes!`; the bring-up measured that the
+built app wasm was byte-identical with and without a length read of either
+constant, and grew by exactly 1,376,063 bytes — 267,003 for the contract plus
+1,101,953 for the delegate — only once code that runtime-folds the data (an
+actual use, such as passing the slice to `delegate_container`) was reached.
+Anyone auditing whether the two modules actually ship in a build has to test
+for the byte growth, not for the presence of the constant in source — the
+constant is in source either way, dead or not, until something forces it in.
+
+**`dx` appends `[web.app] title` from `Dioxus.toml` into whatever `<title>`
+it finds in `index.html`, and does nothing when there is none.** Text
+already in the `<title>` element gets the configured title prefixed onto it
+("adjournadjourn" for `title = "adjourn"` and `<title>adjourn</title>`);
+deleting the `<title>` element entirely means `dx` has nothing to inject into
+and the page ships with no title at all. An empty `<title></title>` paired
+with the value in `Dioxus.toml` is the only combination of the three that
+produces exactly the configured title — `ui/index.html` and `ui/Dioxus.toml`
+both carry comments recording this so it does not get "cleaned up" back to
+one of the two broken forms.
+
+## The app that now exists
+
+`ui/src/app.rs` is the shell: `Screen` (`List`, `New`, `Accept`, `Game(label)`,
+`Settings`) picks which of `ui/src/views/{list,setup,game,settings}.rs` renders,
+and it is the one place the error banner and the busy spinner are drawn, so
+every screen shares one failure surface rather than each rolling its own. It
+mounts with one `Cmd::ListGames`, which doubles as the browser's `adjourn
+init`: the actor registers the delegate as part of connecting, before the
+first command it actually needs to answer.
+
+**One coroutine owns the client, and that is forced, not stylistic.**
+`BrowserClient` takes `&mut self` on every method and is not `Clone` — the
+obvious `Rc<RefCell<BrowserClient>>` shared through a Dioxus context panics at
+runtime, because every method call awaits and a `RefCell` borrow cannot be
+held across an `.await`. `ui/src/conn.rs`'s `use_conn` instead spawns a
+coroutine that owns the client outright and serialises every `Cmd` through
+one channel — screens never touch the transport, they send a `Cmd` and read a
+`Signal`. That removes the hazard structurally instead of managing it with
+runtime borrow discipline that would panic the first time two commands
+overlapped.
+
+**A second, dedicated coroutine exists for exactly one command, `Watch`, and
+for a reason spelled out in `conn.rs`'s own comments.** `watch_label` does not
+return until the game ends — there is no timeout, by design, because a
+correspondence move can take days — so running it on the main actor would
+block `Resign`, `Play`, `ListGames`, and everything else for the rest of the
+game. The watch coroutine holds its own second `BrowserClient` to the same
+node (two sockets to one local node is cheap, and each still has exactly one
+owner, the rule that makes `BrowserClient` safe to hold across an `.await` at
+all) and races the in-flight `watch_label` future against `rx.next()` via
+`futures::select!`. Two things about that race are easy to get backwards
+later:
+
+- **The losing future is *dropped*, and dropping cancels it — no
+  cancellation hook is needed in `session::watch_label`.** A "cleaner"
+  refactor that gave the watch an explicit cancel signal would be solving a
+  problem `select!` + `Drop` already solves for free.
+- **Without the race, only the first game ever opened gets live updates.**
+  A version that ran `watch_label` to completion before accepting its next
+  command would never see the command that opens a second game while the
+  first is still being watched — that command would simply queue behind a
+  future that does not resolve until the first game ends. The race is what
+  lets opening game B while game A is being watched win immediately, cancel
+  A's watch, and re-issue a fresh `Watch` for A only when the UI asks again.
+
+**`Cmd::Open` clears `view` before awaiting, and `GameScreen` filters on
+label — two independent guards against the same failure, deliberately.**
+`view` is one `Signal<Option<GameView>>` shared by every game screen. If
+`Cmd::Open { label }` left the previous game's view in place while its own
+GET was in flight, that stale board would render under the *new* label for
+the whole request — and forever, if the open then errors, since nothing else
+would ever clear it. So `conn.rs` sets `view.set(None)` before awaiting the
+open. Independently, `ui/src/views/game.rs`'s `GameScreen` reads `wires.view`
+filtered by `v.label == label`, so even a `view` update that lands for the
+*wrong* screen (a race between switching screens and an in-flight command
+resolving) renders nothing rather than the wrong game's board under the right
+game's chrome. Removing either guard on the assumption the other one covers
+it would reopen exactly the failure mode the other was written to close.
+
+## Coverage — what runs, what a browser is needed for, and what "browser
+tests exist" does and does not close
+
+`board.rs` has 8 tests, all run natively, all pure-function tests with no
+network and no DOM. `node.rs`'s `route` and its neighbours have 14 tests
+(`ui/tests/routing.rs`), also native, also pure — including the failure
+classifications (`socket_is_gone`, `CloseLatch`, and the `ContractMissing`
+routing added alongside the missing-contract fix below), pulled out from
+under the wasm gate precisely so they could be tested without a browser.
+
+**`ui/tests/browser.rs` exists now, and it is real coverage — but it is not
+CI coverage, and CLAUDE.md previously said this crate had never been loaded
+in a browser at all. That is no longer true.** The app has been built with
+`dx` 0.7.9 (`dx build --platform web`, `dx serve`), served, and driven both by
+hand and by Playwright against a live `freenet local` node: connecting,
+listing games, opening a game, and playing a move all render correctly and
+advance the projected board. Two `#[wasm_bindgen_test]` cases in
+`ui/tests/browser.rs`, run in headless Firefox against a live node on 7509,
+cover `connect`'s dead-port failure path and a live round trip
+(`register_delegate` then `ListGames` through the real delegate). They are
+`#![cfg(target_arch = "wasm32")]`, so a native `cargo test --workspace`
+compiles the file to nothing and runs zero tests from it — confirmed in the
+run below (`Running tests/browser.rs` / `running 0 tests`). They also have
+**no skip path**: unlike the `client/tests` that skip themselves when the
+contract WASM is absent locally, a missing node here is a hard failure, not a
+silent pass, so this file can never masquerade as green when nothing was
+actually checked.
+
+**They are NOT wired into CI.** CI has no browser and no `geckodriver`, and
+nothing in this branch added either. Running them requires `wasm-pack test
+--headless --firefox ui` (or an equivalent `wasm-bindgen-test` runner) plus a
+`freenet local` node reachable at the URL the test hardcodes — set that up
+manually, e.g. in a future CI job with a browser and a node fixture, before
+these can run unattended. Until then they are a local, on-demand check.
+
+**What still has no automated coverage at all, even with these two tests
+landed:** the `setTimeout` that bounds a request (`RESPONSE_TIMEOUT` on
+`get`/`put`/`update`/`delegate`), and that the error handler genuinely keeps
+firing *after* `connect` resolves rather than going quiet — both would need a
+node that answers slowly or errors mid-session, which neither of the two
+browser tests exercises. Those two remain verified only by source-reading and
+by the fact that `connect`'s own bound (see above) is now covered by the
+dead-port test.
+
+The workspace test count below is **168** and does not include the 2 browser
+tests — they run under `wasm-pack`/`wasm-bindgen-test`, never under `cargo
+test`, so they cannot appear in that number by construction, not by
+omission.
 
 ## Testing
 
-`cargo test --workspace --locked` — 161 tests: 99 in `adjourn-core` (24 algebra
+`cargo test --workspace --locked` — 168 tests: 99 in `adjourn-core` (24 algebra
 tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
-9 delegate adapter tests, 16 `adjourn-client` integration tests, and 14
-`adjourn-ui` tests (8 board, 6 routing — see "UI" above for what that number
-does and does not cover). The algebra tests are the point; they run randomized
-partitions and delivery orders. Keep them green. New state-shape features need
-a corresponding law test, not just a happy-path test.
+9 delegate adapter tests, 21 `adjourn-client` tests, and 22 `adjourn-ui` tests
+(8 board, 14 routing — see "UI" above for what that number does and does not
+cover). Two more `adjourn-ui` tests exist in `ui/tests/browser.rs` and are
+**not** in the 168 — they compile to nothing under a native `cargo test`
+(`#![cfg(target_arch = "wasm32")]`) and only run under `wasm-pack test
+--headless --firefox`, against a live node; see "UI" above. The algebra tests
+are the point; they run randomized partitions and delivery orders. Keep them
+green. New state-shape features need a corresponding law test, not just a
+happy-path test.
 
 - `common/tests/algebra.rs` (24) — the monoid laws and the original
   adversarial cases.
@@ -790,40 +947,51 @@ a corresponding law test, not just a happy-path test.
   hijack attempt from a different origin refused as `WrongOrigin`, and a
   double-sign attempt refused through the real dispatch path, not just the
   policy layer beneath it.
-- `client/tests/` (16, across `fake_node.rs` 2, `full_game.rs` 1, `invite.rs`
-  4, `moves.rs` 4, `setup.rs` 2, `updates.rs` 3) — `adjourn_client::session`'s
-  flows run against `FakeNode` (real contract and delegate code, in-memory
-  transport): both players deriving the same contract, a build mismatch
-  refused loudly, a full scholar's-mate game end to end, out-of-turn moves
-  failing before signing, a double-sign attempt refused by the delegate, and
-  (`updates.rs`) `watch_label` driven end to end against `FakeNode`'s per-node
-  subscription tracking, asserting the notification is a `Delta` and that the
-  watcher's callback reports the opponent's move — see "Client" above. These flow tests moved
-  here from `cli/tests/` when the session logic was extracted into
-  `adjourn-client`; the CLI crate itself no longer has a `tests/` directory.
-  Several of these read the compiled contract WASM off disk and skip
-  themselves if it is absent locally -- but panic instead if `CI` is set, so a
-  skip can never masquerade as a pass in CI (see
-  `client/tests/common/mod.rs::contract_wasm`).
-- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (12) — both run natively,
+- `client/` (21, across `src/lib.rs` unit tests 2, `tests/fake_node.rs` 2,
+  `tests/full_game.rs` 1, `tests/invite.rs` 4, `tests/moves.rs` 4,
+  `tests/setup.rs` 3, `tests/updates.rs` 3, `tests/view.rs` 2) —
+  `adjourn_client::session`'s flows run against `FakeNode` (real contract and
+  delegate code, in-memory transport): both players deriving the same
+  contract, a build mismatch refused loudly, a full scholar's-mate game end
+  to end, out-of-turn moves failing before signing, a double-sign attempt
+  refused by the delegate, (`updates.rs`) `watch_label` driven end to end
+  against `FakeNode`'s per-node subscription tracking asserting the
+  notification is a `Delta` and the watcher's callback reports the
+  opponent's move (see "Client" above), (`setup.rs`) each side of an invite
+  getting its own `FakeNode` `World` rather than sharing one — the structure
+  that lets the inviter's conditional GET actually hit the absent-contract
+  branch, which is what the missing-contract fix needed (see "UI" above) —
+  and (`view.rs`) `GameView`'s ordered move list. These flow tests moved here
+  from `cli/tests/` when the session logic was extracted into
+  `adjourn-client`; the CLI crate itself has no `tests/` directory at all —
+  which is also why `WsClient::get`'s wiring of the missing-contract
+  classifier is verified by reading only, not by a test. Several integration
+  tests read the compiled contract WASM off disk and skip themselves if it is
+  absent locally -- but panic instead if `CI` is set, so a skip can never
+  masquerade as a pass in CI (see `client/tests/common/mod.rs::contract_wasm`).
+- `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (14) — both run natively,
   not on wasm: the opening position and its mirror for Black, square
   selection and legal-move highlighting, promotion detection on both back
   ranks, and (`routing.rs`) that `route` tells a response from an update
   notification and never confuses the two, that a node-reported `Err` frame
-  routes to `Failed` rather than being dropped, and that a socket close routes
-  to `Closed`. Then the two halves of the close story: `socket_is_gone`
-  accepts only `onclose`/`onerror` and refuses every decode and reassembly
-  tag (a live-socket error reported as a close would silently end `watch`),
-  and `CloseLatch` keeps the first close reason forever while no survivable
-  error ever latches it (a close is one queue item, so a request in flight can
+  routes to `Failed` rather than being dropped, that a socket close routes to
+  `Closed`, and that a `MissingContract` node error routes to
+  `Routed::ContractMissing` and is never mistaken for an ordinary `Failed`
+  (the missing-contract fix's routing, distinct from the other three failure
+  kinds). Then the two halves of the close story: `socket_is_gone` accepts
+  only `onclose`/`onerror` and refuses every decode and reassembly tag (a
+  live-socket error reported as a close would silently end `watch`), and
+  `CloseLatch` keeps the first close reason forever while no survivable error
+  ever latches it (a close is one queue item, so a request in flight can
   consume the only one and leave `next_update` parked on a dead socket with no
   timeout to save it). All of these are the transport's error decisions pulled
   out as pure functions precisely so they are testable off-wasm — the same
-  move `route` itself was extracted for. What still needs a real browser, and has
-  no coverage: `connect`, the `setTimeout` that bounds a request, and that the
-  error handler actually keeps firing after connect. Both files are
-  pure-function tests with no socket and no DOM in the loop. This is the entire automated test surface
-  for `adjourn-ui` — see "UI" above for what it deliberately does not reach.
+  move `route` itself was extracted for. `ui/tests/browser.rs` (2, wasm-only,
+  **not** counted in the 168) covers `connect`'s dead-port timeout and a live
+  `register_delegate`/`ListGames` round trip — see "UI" above for exactly what
+  that file does and does not close, and why it is not wired into CI. What
+  still has no automated coverage anywhere: the `setTimeout` that bounds a
+  request, and that the error handler keeps firing after `connect` resolves.
 
 ### Check against the network's own verifier
 
@@ -952,6 +1120,35 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   went through in the first live run, and again when a node started this way
   in an earlier session was found still running after the session that
   started it had ended. See `docs/runbook-two-nodes.md`.
+- **A GET for a contract a node has never seen answers `Err`, not
+  `Ok(None)`.** Confirmed against a live `freenet 0.2.130` node while binding
+  through the UI: `game_bind`'s inviter path (GET, PUT only if absent) hit
+  `Err(ContractError::MissingContract)` and the PUT never ran, so the invite
+  exchange could not complete. Fixed at the transport boundary in both
+  `WsClient::get` and `BrowserClient::get` — see "UI" above and the "Client"
+  section for the full account, including why no `FakeNode` test caught it.
+- **Two `freenet local` nodes on one machine do NOT peer, and the two-node
+  live-update path remains unverified end to end because of that, not because
+  of a UI defect.** Both nodes in `docs/runbook-two-nodes.md`'s setup resolve
+  `mode = "local"` in their generated config — the binary's own `--help`
+  calls this "local-only mode... no real P2P" — so ports 7509 and 7510 never
+  peer, and one node's contract storage is fully isolated from the other's
+  regardless of how many times the same deterministic contract is PUT to
+  each. Driving the UI against this pair confirmed the gap is environmental,
+  not a bug in `conn.rs` or `watch_label`: playing `e2e4` on one node's board
+  advanced that node's own ply from 0 to 1 correctly, while the other node's
+  board stayed at ply 0 — and forcing a fresh `Cmd::Open` on the receiving
+  side (bypassing the watch coroutine entirely, a plain re-GET) returned the
+  same un-advanced state from that node's own storage. The move never left
+  the first node at all; nothing was there for a subscription to miss. Actual
+  peering needs `freenet network --is-gateway` on one side and `freenet
+  network --gateway "host:port,pubkey"` on the other, which
+  `docs/runbook-two-nodes.md` does not set up as written — the runbook's "the
+  other side sees your move" checks in section 4.5 are therefore unverified
+  against this exact setup, and the file has been annotated accordingly. This
+  is exactly the same class of gap `CLAUDE.md` already records for `watch`
+  against `FakeNode` rather than a real node: the mechanism is exercised, the
+  live cross-peer path is not.
 
 ## Roadmap
 
@@ -968,6 +1165,13 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
    real node.
 4. `ui/` (`adjourn-ui`): a Dioxus web frontend implementing that transport in
    a browser (`BrowserClient` in `ui/src/node.rs`) plus a pure board
-   projection (`ui/src/board.rs`) — compiles for `wasm32-unknown-unknown` and
-   is compile-checked in CI. **Not done: actually loading it in a browser.**
-   See "UI" above for exactly what is and is not tested.
+   projection (`ui/src/board.rs`), a connection actor (`conn.rs`), and the
+   four screens (`app.rs`/`views/`) — done, and it has now actually been
+   built with `dx` 0.7.9, served, and driven against a live `freenet local`
+   node: connecting, listing games, opening a game, and playing a move all
+   work. `ui/tests/browser.rs` adds two `wasm-bindgen-test` cases against a
+   live node, but they are not wired into CI (no browser, no `geckodriver`
+   there). What remains unverified end to end is the cross-peer live-update
+   path — see "Runtime assumptions, verified" above for why the two-node
+   setup this needs does not currently peer. See "UI" above for exactly what
+   is and is not tested.
