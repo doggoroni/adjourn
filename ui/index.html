@@ -82,6 +82,15 @@
          two never differ in visual weight. */
       .piece.white { color: #fff; text-shadow: 0 0 2px #000, 0 1px 2px #0008; }
       .piece.black { color: #1a1a1a; text-shadow: 0 0 1px #fff6; }
+
+      .game { display: grid; grid-template-columns: minmax(0, 1fr) 14rem; gap: 1.5rem; align-items: start; }
+      .right { background: rgba(255,255,255,.04); border-radius: 6px; padding: .75rem 1rem; }
+      .history { max-height: 30rem; overflow-y: auto; margin: 0; padding-left: 1.5rem; font-variant-numeric: tabular-nums; }
+      .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+      .promo { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+               justify-content: center; gap: .5rem; background: #000a; }
+      .promo button { font-size: 1.1rem; padding: .5rem 1.5rem; }
+      @media (max-width: 40rem) { .game { grid-template-columns: 1fr; } }
     </style>
   </head>
   <body>

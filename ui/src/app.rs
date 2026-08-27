@@ -55,7 +55,7 @@ pub fn App() -> Element {
                 Screen::List => rsx! { crate::views::list::GameList { wires, screen } },
                 Screen::New => rsx! { crate::views::setup::NewGame { wires } },
                 Screen::Accept => rsx! { crate::views::setup::AcceptInvite { wires } },
-                Screen::Game(_) => rsx! { p { class: "hint", "the game screen lands in Task 4" } },
+                Screen::Game(label) => rsx! { crate::views::game::GameScreen { wires, label } },
                 Screen::Settings =>
                     rsx! { crate::views::settings::Settings { node_url, tx: wires.tx } },
             }
