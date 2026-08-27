@@ -94,7 +94,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
     use adjourn_client::node::delegate_container;
     use adjourn_client::session;
     use adjourn_core::delegate_api::{Request, Response};
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
 
     let mut games = use_signal(Vec::<GameSummary>::new);
     let mut view = use_signal(|| None::<GameView>);
@@ -115,56 +115,98 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
     // across an `.await` at all.
     let watch_tx = use_coroutine(move |mut rx: UnboundedReceiver<Cmd>| async move {
         let mut client: Option<BrowserClient> = None;
+        // The command that should be processed next. Populated either by a
+        // fresh `rx.next().await` at the bottom of the loop, or by the
+        // command that raced an in-flight watch and won -- see below.
+        let mut next_cmd = rx.next().await;
 
-        while let Some(cmd) = rx.next().await {
-            let Cmd::Watch { label } = cmd else {
-                // Only this coroutine's own command ever arrives here -- see
-                // the forwarding arm in the main actor below -- but ignoring
+        while let Some(cmd) = next_cmd.take() {
+            match cmd {
+                // Only `Watch` and `Reconnect` ever arrive here -- see the
+                // forwarding arms in the main actor below -- but ignoring
                 // anything else is cheaper than asserting it can't happen.
-                continue;
-            };
-
-            error.set(None);
-
-            let outcome: anyhow::Result<()> = async {
-                if client.is_none() {
-                    let mut fresh = BrowserClient::connect(&node_url()).await?;
-                    let (container, _key) = delegate_container(crate::DELEGATE_WASM.to_vec());
-                    fresh.register_delegate(container).await?;
-                    client = Some(fresh);
-                }
-                let c = client.as_mut().expect("just connected");
-                let wasm = crate::CONTRACT_WASM.to_vec();
-
-                // `watch_label` runs until the game ends, calling back
-                // after every update. It merges rather than replaces,
-                // and it subscribes -- `open_game_view`'s GET does not,
-                // which is why a watcher needs its own command.
-                let mut view_sig = view;
-                let l = label.clone();
-                session::watch_label(c, &label, wasm, move |status| {
-                    view_sig.with_mut(|v| {
-                        if let Some(v) = v.as_mut() {
-                            if v.label == l {
-                                v.status = status.clone();
-                            }
-                        }
-                    });
-                })
-                .await?;
-                Ok(())
-            }
-            .await;
-
-            if let Err(e) = outcome {
-                // Same rule as the main actor: only a genuine transport death
-                // tears the client down and forces a reconnect (and a fresh
-                // `RegisterDelegate`) on the next watch.
-                let dead = client.as_ref().is_none_or(BrowserClient::is_disconnected);
-                if dead {
+                Cmd::Reconnect => {
                     client = None;
+                    error.set(None);
                 }
-                error.set(Some(format!("{e:#}")));
+                Cmd::Watch { label } => {
+                    error.set(None);
+
+                    // `watch_label` does not return until the game is
+                    // decided or the transport dies -- there is no timeout,
+                    // by design (a correspondence move can take days). So it
+                    // has to run raced against the next incoming command:
+                    // opening a second game, or a reconnect. Whichever
+                    // resolves first wins; the other future is simply
+                    // dropped, and dropping a future cancels it -- no
+                    // cancellation hook needed in `session::watch_label`.
+                    let outcome: anyhow::Result<Option<Cmd>> = async {
+                        if client.is_none() {
+                            let mut fresh = BrowserClient::connect(&node_url()).await?;
+                            let (container, _key) =
+                                delegate_container(crate::DELEGATE_WASM.to_vec());
+                            fresh.register_delegate(container).await?;
+                            client = Some(fresh);
+                        }
+                        let c = client.as_mut().expect("just connected");
+                        let wasm = crate::CONTRACT_WASM.to_vec();
+
+                        // `watch_label` runs until the game ends, calling back
+                        // after every update. It merges rather than replaces,
+                        // and it subscribes -- `open_game_view`'s GET does not,
+                        // which is why a watcher needs its own command.
+                        let mut view_sig = view;
+                        let l = label.clone();
+                        let watch_fut = session::watch_label(c, &label, wasm, move |status| {
+                            view_sig.with_mut(|v| {
+                                if let Some(v) = v.as_mut() {
+                                    if v.label == l {
+                                        v.status = status.clone();
+                                    }
+                                }
+                            });
+                        })
+                        .fuse();
+                        futures::pin_mut!(watch_fut);
+                        let next = rx.next().fuse();
+                        futures::pin_mut!(next);
+
+                        futures::select! {
+                            res = watch_fut => res.map(|()| None),
+                            next_cmd = next => Ok(next_cmd),
+                        }
+                    }
+                    .await;
+
+                    match outcome {
+                        // The watch ended on its own (decided game, or
+                        // transport error) -- fetch the next command fresh,
+                        // same as before this fix.
+                        Ok(None) => {}
+                        // A new command raced in and won while the watch was
+                        // still live. It has already cancelled that watch
+                        // (the future was dropped); process it next time
+                        // round the loop, without an intervening
+                        // `rx.next().await` that would eat a second command.
+                        Ok(Some(won)) => next_cmd = Some(won),
+                        Err(e) => {
+                            // Same rule as the main actor: only a genuine
+                            // transport death tears the client down and
+                            // forces a reconnect (and a fresh
+                            // `RegisterDelegate`) on the next watch.
+                            let dead = client.as_ref().is_none_or(BrowserClient::is_disconnected);
+                            if dead {
+                                client = None;
+                            }
+                            error.set(Some(format!("{e:#}")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if next_cmd.is_none() {
+                next_cmd = rx.next().await;
             }
         }
     });
@@ -182,6 +224,11 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                 client = None;
                 connected.set(false);
                 error.set(None);
+                // The watch coroutine holds its own client to the same node
+                // URL and must not keep talking to the old one -- forward the
+                // teardown so it cancels any in-flight watch and drops its
+                // client too.
+                watch_tx.send(Cmd::Reconnect);
                 continue;
             }
 
