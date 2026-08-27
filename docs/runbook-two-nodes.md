@@ -3,7 +3,7 @@
 How to play a complete correspondence game across two real `freenet` nodes on
 one machine, each acting as one player.
 
-## Status: verified peering and propagation; no full game to mate yet
+## Status: verified end to end -- peering, propagation, and a full game to mate
 
 **Sections 1-3 (build, starting the nodes) work today**, and section 2b's
 peered pair is verified. Section 4 (`init`, `invite`, `game bind`, `move`,
@@ -26,9 +26,12 @@ a live node, not only against `FakeNode`.
 Two things still NOT recorded here, stated plainly so the gap does not get
 rounded off:
 
-- **No full game to mate has been played through this runbook.** The verified
-  run reached ply 3. The scholar's-mate line in section 4.5 is still
-  unexercised past that point.
+- **A full game to mate HAS now been played**, on a three-node topology (a
+  dedicated gateway holding no player, plus two player peers). Both nodes
+  independently reported ply 7, the same FEN, and "White wins -- checkmate",
+  on the same contract id -- which is also the direct observation that both
+  players derived identical `GameParams`. See `CLAUDE.md`, "Runtime
+  assumptions, verified".
 - **`adjourn show` polling did NOT see the propagated move**, and that is
   correct behaviour rather than a defect -- see section 2b's "Reading the
   result correctly". Use `watch` to confirm propagation.
@@ -150,6 +153,41 @@ it on request.
 index -- a gateway always runs isolated under it anyway, and supplying an
 explicit `--gateway` entry makes the CLI entries REPLACE the on-disk
 `gateways.toml` cache rather than merge with it.
+
+### The three-node shape, which is what actually played a full game
+
+The pair above (one player doubling as the gateway) works and is verified.
+But the topology that carried a game to mate uses a **dedicated gateway
+holding no player**, plus two player peers dialling it. Prefer it: neither
+player needs a public address, and a player is a peer rather than
+infrastructure.
+
+```bash
+# gateway -- no player, no game, just a rendezvous point
+freenet network --is-gateway   --public-network-address 192.168.1.121 --public-network-port 31337   --network-port 31337 --ws-api-port 7508   --skip-load-from-network --disable-auto-update   --data-dir "$GW_DIR/data" --config-dir "$GW_DIR/config"
+
+# player 1
+freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31338 --ws-api-port 7509   --skip-load-from-network --disable-auto-update   --data-dir "$ALICE_DIR/data" --config-dir "$ALICE_DIR/config"
+
+# player 2
+freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31339 --ws-api-port 7510   --skip-load-from-network --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
+```
+
+On this topology both nodes independently reported the same final position and
+the same outcome:
+
+```
+ply 7, Black to move
+fen: r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4
+game over: White wins -- checkmate
+```
+
+`adjourn game list` on each also showed the **same contract id** and
+`last signed ply` 7 for White against 6 for Black -- the correct split for a
+7-ply game. The matching contract id is worth pausing on: it is the direct
+observation that both players derived byte-identical `GameParams`, the
+property whose failure mode is two players sitting on separate contracts with
+no error anywhere.
 
 ### Reading the result correctly -- this part is a trap
 

@@ -1153,8 +1153,8 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   freenet network     --gateway "192.168.1.121:31337,<64-hex-x25519-pubkey>"     --network-port 31338 --ws-api-port 7510     --skip-load-from-network --disable-auto-update     --data-dir .../bob/data --config-dir .../bob/config
   ```
 
-  A scholar's-mate line was played alternately against the two nodes. What it
-  established, and the distinction is the useful part:
+  A scholar's-mate line was played alternately against the two nodes. What
+  that first two-node run established, and the distinction is the useful part:
 
   - **`e2e4` (ply 1) crossed from Alice's node to Bob's.** Not directly
     observed in transit, but entailed: `play_move` reads and projects the
@@ -1178,9 +1178,34 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   would have sat on ply 2 indefinitely, showing a stale board with no error --
   the precise failure that section predicts.
 
-  Read the negative result narrowly. It says `show` reports only that node's
-  own storage, which is what `show` is documented to do. It does not say
-  updates fail to propagate to a subscribed peer.
+  Read the `show` result narrowly. It says `show` reports only that node's own
+  storage, which is what `show` is documented to do. It does not say updates
+  fail to propagate to a subscribed peer.
+
+  **A FULL GAME TO MATE then completed on a three-node topology**, same date
+  and version: a dedicated gateway holding no player (`--is-gateway`,
+  ws-api 7508) plus two player peers dialling it (ws-api 7509 and 7510,
+  network ports 31338 and 31339). This is the better shape and the one to
+  copy -- neither player needs a public address, and a player is a peer rather
+  than infrastructure.
+
+  Both nodes independently reported the same final state:
+
+  ```
+  al -- ply 7, Black to move
+  fen: r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4
+  game over: White wins -- checkmate
+  ```
+
+  Two things that convergence pins down beyond propagation itself. Both sides
+  listed the **same contract id** (`5TxQj3SpRA5GohbZ8h9gz7ErGQ8BZZ4Le9iMZxqMwMFu`),
+  which is the direct observation of the property the whole `adjourn-client`
+  crate exists to guarantee -- both players deriving byte-identical
+  `GameParams`, whose failure mode is two players on separate contracts with no
+  error anywhere. And `last signed ply` was 7 for White and 6 for Black, the
+  correct split for a 7-ply game, so the delegate's one-signature-per-(game,
+  ply) accounting held across the whole game on both stores.
+
 - **The WASM is byte-identical across two different Linux distributions.**
   Ubuntu 24.04 under WSL2 and Arch (Omarchy, kernel 7.1.8) both produced
   contract `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`
