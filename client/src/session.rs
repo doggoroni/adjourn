@@ -337,6 +337,23 @@ pub async fn open_game_view<N: NodeClient>(
 /// Driven by `status.chain` and NOT by iterating `state.records`: the record
 /// set is a `BTreeMap` keyed by ID, so iterating it yields hash order, which
 /// has nothing to do with the order the moves were played.
+///
+/// The inner `?` in the `filter_map` below silently skips a chain id that is
+/// missing from `view.state.records`, rather than reporting it. That is only
+/// safe because `view.status` and `view.state` are always produced by one
+/// `project(&state, ...)` call over the same `state` -- every id `status.chain`
+/// names is, by construction, a record in that same `state`. It stops being
+/// safe the moment a caller holds a `status` from one merge and a `state`
+/// from an earlier one: exactly the bug `watch_label`'s callback used to
+/// invite, when the UI updated `status` on every notification but left
+/// `state` frozen at whatever the initial open returned. The fix there was to
+/// keep the pair moving together (see `watch_label`'s callback signature),
+/// not to make this function tolerate the two drifting apart -- a `GameView`
+/// with a `status`/`state` mismatch is a bug at the call site, and this
+/// function has no way to tell "the game legitimately doesn't have that
+/// record yet" from "someone handed me two different snapshots", so silently
+/// dropping the id is the least-wrong of the two options it can't
+/// distinguish. If this ever fires in practice, look at the caller, not here.
 pub fn moves_in_order(view: &GameView) -> Vec<String> {
     view.status
         .chain
@@ -451,11 +468,11 @@ pub async fn watch_label<N: NodeClient>(
     node: &mut N,
     label: &str,
     contract_wasm: Vec<u8>,
-    mut on_status: impl FnMut(&Status),
+    mut on_status: impl FnMut(&GameState, &Status),
 ) -> anyhow::Result<()> {
     let g = open_game(node, label, contract_wasm).await?;
     let mut state = g.view.state;
-    on_status(&g.view.status);
+    on_status(&state, &g.view.status);
     // A decided game will never produce another notification, so entering the
     // loop would block forever on a game that has already ended -- printing
     // the final position and then hanging.
@@ -490,7 +507,7 @@ pub async fn watch_label<N: NodeClient>(
         // two GETs agree) does not render the same position twice.
         if state.records.len() != before {
             let status = project(&state, &g.view.params);
-            on_status(&status);
+            on_status(&state, &status);
             if status.is_over() {
                 return Ok(());
             }
@@ -546,7 +563,7 @@ pub async fn watch_label<N: NodeClient>(
             _ => continue,
         }
         let status = project(&state, &g.view.params);
-        on_status(&status);
+        on_status(&state, &status);
         if status.is_over() {
             return Ok(());
         }

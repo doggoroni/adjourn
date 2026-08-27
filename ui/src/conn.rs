@@ -75,14 +75,28 @@ pub struct Wires {
     pub games: Signal<Vec<GameSummary>>,
     pub view: Signal<Option<GameView>>,
     /// The invite blob `NewGame` produces, shown only on the "new game"
-    /// screen. Kept separate from `offer_blob` so navigating between the two
-    /// setup screens never renders one command's output captioned as the
-    /// other's -- see the fix-round-1 note in the task report.
-    pub invite_blob: Signal<Option<String>>,
+    /// screen, and only for the label that produced it -- paired with that
+    /// label so remounting `NewGame` with its local `label` signal reset to
+    /// `""` (e.g. navigating to "games" and back) cannot render a surviving
+    /// blob under the wrong label, and so `BindOffer` is never built with a
+    /// label the blob does not match. Kept separate from `offer_blob` so
+    /// navigating between the two setup screens never renders one command's
+    /// output captioned as the other's -- see the fix-round-1 note in the
+    /// task report.
+    pub invite_blob: Signal<Option<(String, String)>>,
     /// The offer blob `Accept` produces, shown only on the "accept invite"
-    /// screen.
-    pub offer_blob: Signal<Option<String>>,
+    /// screen, keyed by label for the same reason as `invite_blob`.
+    pub offer_blob: Signal<Option<(String, String)>>,
     pub error: Signal<Option<String>>,
+    /// Set only by the watch actor, and only on a genuine transport death
+    /// while a watch was live -- never on the quiet, legitimate end of a
+    /// decided game. Kept separate from `error` so an unrelated successful
+    /// command in the main actor (e.g. the error banner's own "retry", which
+    /// sends `ListGames`) cannot clear it out from under the user: `error` is
+    /// cleared at the top of every main-actor command, and folding this into
+    /// it would let that clear silently erase the only evidence the watch
+    /// died.
+    pub watch_error: Signal<Option<String>>,
     pub busy: Signal<bool>,
     pub connected: Signal<bool>,
 }
@@ -98,9 +112,10 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
 
     let mut games = use_signal(Vec::<GameSummary>::new);
     let mut view = use_signal(|| None::<GameView>);
-    let mut invite_blob = use_signal(|| None::<String>);
-    let mut offer_blob = use_signal(|| None::<String>);
+    let mut invite_blob = use_signal(|| None::<(String, String)>);
+    let mut offer_blob = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
+    let mut watch_error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let mut connected = use_signal(|| false);
 
@@ -127,10 +142,10 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                 // anything else is cheaper than asserting it can't happen.
                 Cmd::Reconnect => {
                     client = None;
-                    error.set(None);
+                    watch_error.set(None);
                 }
                 Cmd::Watch { label } => {
-                    error.set(None);
+                    watch_error.set(None);
 
                     // `watch_label` does not return until the game is
                     // decided or the transport dies -- there is no timeout,
@@ -157,16 +172,27 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         // which is why a watcher needs its own command.
                         let mut view_sig = view;
                         let l = label.clone();
-                        let watch_fut = session::watch_label(c, &label, wasm, move |status| {
-                            view_sig.with_mut(|v| {
-                                if let Some(v) = v.as_mut() {
-                                    if v.label == l {
-                                        v.status = status.clone();
+                        let watch_fut =
+                            session::watch_label(c, &label, wasm, move |state, status| {
+                                view_sig.with_mut(|v| {
+                                    if let Some(v) = v.as_mut() {
+                                        if v.label == l {
+                                            // Update together: `moves_in_order`
+                                            // resolves `status.chain` against
+                                            // `state.records`, so updating
+                                            // `status` alone advances the board
+                                            // and the status line while the
+                                            // move history stays frozen at
+                                            // whatever `state` the screen
+                                            // opened with -- forever, since
+                                            // nothing else ever touches it.
+                                            v.state = state.clone();
+                                            v.status = status.clone();
+                                        }
                                     }
-                                }
-                            });
-                        })
-                        .fuse();
+                                });
+                            })
+                            .fuse();
                         futures::pin_mut!(watch_fut);
                         let next = rx.next().fuse();
                         futures::pin_mut!(next);
@@ -179,10 +205,29 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                     .await;
 
                     match outcome {
-                        // The watch ended on its own (decided game, or
-                        // transport error) -- fetch the next command fresh,
-                        // same as before this fix.
-                        Ok(None) => {}
+                        // `watch_label` returns `Ok(())` in two situations
+                        // that look identical from here and are NOT the same:
+                        // the game ended (quiet, legitimate -- a decided game
+                        // never produces another notification) and the
+                        // socket died (`next_update` returned `Ok(None)`
+                        // because `BrowserClient`'s `CloseLatch` fired). Tell
+                        // them apart the same way the main actor does: a
+                        // genuine transport death is exactly what
+                        // `is_disconnected()` latches, and nothing else does.
+                        // Treating both as quiet would freeze the board with
+                        // no banner and no spinner on a restarted node -- the
+                        // exact silent failure this file exists to rule out.
+                        Ok(None) => {
+                            let dead = client.as_ref().is_none_or(BrowserClient::is_disconnected);
+                            if dead {
+                                client = None;
+                                watch_error.set(Some(
+                                    "the connection to the node was lost while watching this \
+                                     game"
+                                        .to_string(),
+                                ));
+                            }
+                        }
                         // A new command raced in and won while the watch was
                         // still live. It has already cancelled that watch
                         // (the future was dropped); process it next time
@@ -198,7 +243,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                             if dead {
                                 client = None;
                             }
-                            error.set(Some(format!("{e:#}")));
+                            watch_error.set(Some(format!("{e:#}")));
                         }
                     }
                 }
@@ -275,20 +320,30 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                             browser_nonce()?,
                         )
                         .await?;
-                        invite_blob.set(Some(inv.encode()));
+                        invite_blob.set(Some((label, inv.encode())));
                     }
                     Cmd::Accept { label, invite } => {
                         let inv = Invite::decode(invite.trim())?;
                         let offer =
                             session::invite_accept(c, &label, &inv, wasm, browser_entropy()?)
                                 .await?;
-                        offer_blob.set(Some(offer.encode()));
+                        offer_blob.set(Some((label, offer.encode())));
                     }
                     Cmd::Bind { label, offer } => {
                         let off = GameOffer::decode(offer.trim())?;
                         session::game_bind(c, &label, &off, wasm).await?;
-                        invite_blob.set(None);
-                        offer_blob.set(None);
+                        // Clear only the invite blob this bind produced --
+                        // this is the inviter's flow, finalising the offer
+                        // their opponent sent back. `offer_blob` belongs to a
+                        // wholly separate flow (this user as the ACCEPTER of
+                        // some other game), and clearing it here wiped it out
+                        // from under a user who happened to be both an
+                        // inviter and an accepter at once.
+                        invite_blob.with_mut(|b| {
+                            if b.as_ref().is_some_and(|(l, _)| *l == label) {
+                                *b = None;
+                            }
+                        });
                     }
                     Cmd::Open { label } => {
                         // Clear the shared view before awaiting the open, not
@@ -310,7 +365,8 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         view.set(Some(session::open_game_view(c, &label, wasm).await?));
                     }
                     Cmd::DrawOffer { label } => {
-                        session::draw_offer(c, &label, wasm).await?;
+                        session::draw_offer(c, &label, wasm.clone()).await?;
+                        view.set(Some(session::open_game_view(c, &label, wasm).await?));
                     }
                     Cmd::DrawAccept { label } => {
                         session::draw_accept(c, &label, wasm.clone()).await?;
@@ -362,6 +418,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
         invite_blob,
         offer_blob,
         error,
+        watch_error,
         busy,
         connected,
     }
@@ -379,9 +436,10 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
 
     let games = use_signal(Vec::<GameSummary>::new);
     let view = use_signal(|| None::<GameView>);
-    let invite_blob = use_signal(|| None::<String>);
-    let offer_blob = use_signal(|| None::<String>);
+    let invite_blob = use_signal(|| None::<(String, String)>);
+    let offer_blob = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
+    let watch_error = use_signal(|| None::<String>);
     let busy = use_signal(|| false);
     let connected = use_signal(|| false);
 
@@ -398,6 +456,7 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
         invite_blob,
         offer_blob,
         error,
+        watch_error,
         busy,
         connected,
     }

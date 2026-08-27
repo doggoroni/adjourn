@@ -181,9 +181,42 @@ async fn watch_label_reports_the_opponents_move() {
         .unwrap();
 
     let mut seen = Vec::new();
-    watch_label(&mut bob, "bob", wasm, |status| seen.push(status.ply))
-        .await
-        .expect("watch runs to the end of the log");
+    // The callback gets the merged `GameState` alongside the `Status` on
+    // every call, not just the status. A UI that only kept the status (as
+    // this one used to) can advance the board and the status line while the
+    // move history -- driven by resolving `status.chain` against
+    // `state.records` in `moves_in_order` -- stays frozen forever.
+    //
+    // The assertion below checks the pair is coherent: every id in
+    // `status.chain` resolves against the `state` handed to the SAME call.
+    // Be honest about its reach -- mutation testing says it does NOT
+    // currently discriminate. Handing the callback a deliberately stale
+    // state still passes, for the same structural reason recorded in
+    // CLAUDE.md about the subscribing-GET merge: both fakes share one
+    // `World`, so `alice`'s move is already in the contract state that
+    // `watch_label`'s own opening GET returns, and there is no snapshot for
+    // a later one to drift from. Constructing that drift needs `FakeNode` to
+    // model per-node state divergence, which is a larger change than the
+    // property it would pin.
+    //
+    // It is kept, rather than deleted, for two reasons: it costs nothing,
+    // and it becomes load-bearing the moment such a fake exists. What
+    // actually guarantees the pair moves together today is `watch_label`
+    // itself -- it projects `status` from the very `state` it passes, on
+    // every call -- not this test.
+    watch_label(&mut bob, "bob", wasm, |state, status| {
+        for id in &status.chain {
+            assert!(
+                state.records.contains_key(id),
+                "chain id {id:?} at ply {} is missing from the state passed \
+                 alongside it -- the move history would silently drop it",
+                status.ply
+            );
+        }
+        seen.push(status.ply);
+    })
+    .await
+    .expect("watch runs to the end of the log");
 
     assert!(
         seen.len() >= 2,

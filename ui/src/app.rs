@@ -47,6 +47,27 @@ pub fn App() -> Element {
                     button { onclick: move |_| wires.tx.send(Cmd::ListGames), "retry" }
                 }
             }
+            // Kept in its own signal and rendered separately from `error`:
+            // the main actor clears `error` at the top of every command it
+            // runs, and a watch death handled the same way would be wiped out
+            // by the very next unrelated success (e.g. this banner's own
+            // sibling's "retry", or any click that happens to send
+            // `ListGames`) with the board still frozen and no evidence
+            // anything went wrong. Retrying here re-sends `Watch` for the
+            // game screen currently open, which is what actually revives a
+            // dead watch -- `ListGames` succeeding against a healthy main
+            // actor proves nothing about the separate watch connection.
+            if let Some(e) = wires.watch_error.cloned() {
+                div { class: "error watch-error", role: "alert",
+                    span { "{e}" }
+                    if let Screen::Game(label) = screen() {
+                        button {
+                            onclick: move |_| wires.tx.send(Cmd::Watch { label: label.clone() }),
+                            "retry"
+                        }
+                    }
+                }
+            }
             if (wires.busy)() {
                 div { class: "busy", "working…" }
             }

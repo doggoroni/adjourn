@@ -378,7 +378,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 "scripts/build-contract.sh",
             )?;
             let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
-            session::watch_label(&mut node, &label, contract_wasm, |status| {
+            session::watch_label(&mut node, &label, contract_wasm, |_state, status| {
                 output::render_status(&label, status);
             })
             .await?;

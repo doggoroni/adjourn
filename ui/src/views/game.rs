@@ -22,6 +22,18 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
     // some legal games, and the algebra already supports underpromotion.
     let mut promoting = use_signal(|| None::<((char, u8), (char, u8))>);
 
+    // Re-establish the watch whenever this screen mounts on a label, or the
+    // label changes -- `GameList`'s row click sends the first `Watch`, but
+    // nothing else ever sends another one. A watch that ends any way other
+    // than being raced out by a fresh `Watch` (the game decides, or the
+    // socket dies -- see `conn.rs`) leaves the screen sitting on a dead watch
+    // for as long as the user stays here. `label` is a plain prop, not a
+    // signal, so `use_reactive!` is what makes this effect re-run when it
+    // changes rather than only once on the very first mount.
+    use_effect(use_reactive!(|label| {
+        wires.tx.send(Cmd::Watch { label });
+    }));
+
     // `view` is one signal shared by every bound game. A stale view left over
     // from a different game (or one still in flight after `Cmd::Open` cleared
     // it to `None`) must never render under this screen's label -- treat a

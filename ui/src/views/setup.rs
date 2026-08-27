@@ -10,6 +10,19 @@ pub fn NewGame(wires: Wires) -> Element {
     let mut label = use_signal(String::new);
     let mut side = use_signal(|| Side::White);
 
+    // `invite_blob` is keyed by the label that produced it and outlives this
+    // component's own `label` signal, which resets to `""` on remount --
+    // navigate to "games" and back to "new game" and the blob for a
+    // previously created invite would otherwise render here captioned as
+    // whatever the (empty) label happens to be right now. Only render it, and
+    // only build `BindOffer` with it, when the stored label still matches.
+    let current_label = label().trim().to_string();
+    let invite_for_this_label = wires
+        .invite_blob
+        .read()
+        .clone()
+        .filter(|(l, _)| *l == current_label);
+
     rsx! {
         section { class: "screen",
             h2 { "new game" }
@@ -46,11 +59,11 @@ pub fn NewGame(wires: Wires) -> Element {
                 "create invite"
             }
 
-            if let Some(b) = wires.invite_blob.cloned() {
+            if let Some((_, b)) = invite_for_this_label {
                 h3 { "send this invite to your opponent" }
                 textarea { id: "invite-out", readonly: true, rows: 4, "{b}" }
                 h3 { "then paste the offer they send back" }
-                BindOffer { wires, label: label().trim().to_string() }
+                BindOffer { wires, label: current_label.clone() }
             }
         }
     }
@@ -88,6 +101,14 @@ pub fn AcceptInvite(wires: Wires) -> Element {
     let mut label = use_signal(String::new);
     let mut invite = use_signal(String::new);
 
+    // Same label-keying as `NewGame`'s `invite_for_this_label` -- see there.
+    let current_label = label().trim().to_string();
+    let offer_for_this_label = wires
+        .offer_blob
+        .read()
+        .clone()
+        .filter(|(l, _)| *l == current_label);
+
     rsx! {
         section { class: "screen",
             h2 { "accept invite" }
@@ -113,7 +134,7 @@ pub fn AcceptInvite(wires: Wires) -> Element {
                 }),
                 "accept"
             }
-            if let Some(b) = wires.offer_blob.cloned() {
+            if let Some((_, b)) = offer_for_this_label {
                 h3 { "send this offer back to the inviter" }
                 textarea { id: "offer-out", readonly: true, rows: 4, "{b}" }
             }
