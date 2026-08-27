@@ -22,7 +22,11 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
     // some legal games, and the algebra already supports underpromotion.
     let mut promoting = use_signal(|| None::<((char, u8), (char, u8))>);
 
-    let Some(view) = wires.view.read().clone() else {
+    // `view` is one signal shared by every bound game. A stale view left over
+    // from a different game (or one still in flight after `Cmd::Open` cleared
+    // it to `None`) must never render under this screen's label -- treat a
+    // mismatch exactly like "nothing loaded yet".
+    let Some(view) = wires.view.read().clone().filter(|v| v.label == label) else {
         return rsx! { section { class: "screen", p { "loading {label}…" } } };
     };
 
@@ -39,7 +43,8 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
     rsx! {
         section { class: "screen game",
             div { class: "left",
-                div { class: "board",
+                div {
+                    class: if over || !our_turn { "board inactive" } else { "board" },
                     for sq in board.iter().copied() {
                         div {
                             key: "{sq.file}{sq.rank}",
@@ -53,6 +58,17 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
                                 let label = label.clone();
                                 let status = view.status.clone();
                                 move |_| {
+                                    // `squares()` highlights legal targets on
+                                    // game-over alone; it never looks at whose
+                                    // turn it is (see `board.rs`, deliberately
+                                    // left untouched). Gate here instead: on
+                                    // the opponent's turn, or once the game is
+                                    // over, a click must not select a piece or
+                                    // submit a move -- the board would only
+                                    // offer moves `play_move` refuses.
+                                    if over || !our_turn {
+                                        return;
+                                    }
                                     let here = (sq.file, sq.rank);
                                     match selected() {
                                         // Second click: play it, unless it promotes.

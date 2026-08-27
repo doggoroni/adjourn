@@ -77,6 +77,11 @@
       .sq.selected { background: var(--selected); }
       .sq.target { background: var(--target); }
 
+      /* Not your turn, or the game is over: clicks are gated in game.rs, but
+         the pointer cursor kept inviting one anyway. Purely cosmetic -- see
+         fix-round-1 in the task report. */
+      .board.inactive .sq { cursor: default; }
+
       .piece { font-size: min(9vw, 2.6rem); line-height: 1; }
       /* One glyph set for both sides; colour carries the distinction, so the
          two never differ in visual weight. */

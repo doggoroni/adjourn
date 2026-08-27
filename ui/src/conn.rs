@@ -166,6 +166,14 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         offer_blob.set(None);
                     }
                     Cmd::Open { label } => {
+                        // Clear the shared view before awaiting the open, not
+                        // after: otherwise a stale game's board keeps
+                        // rendering under the new label for the entire
+                        // request, and forever if the open then errors --
+                        // the label guard in `GameScreen` alone would leave
+                        // that case showing "loading" forever rather than
+                        // the honest stale-cleared state.
+                        view.set(None);
                         view.set(Some(session::open_game_view(c, &label, wasm).await?));
                     }
                     Cmd::Play { label, uci } => {
