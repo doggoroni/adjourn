@@ -28,9 +28,9 @@ async fn connecting_to_a_dead_port_fails_rather_than_hanging() {
 /// The success path, end to end against a live node.
 #[wasm_bindgen_test]
 async fn a_live_node_registers_the_delegate_and_lists_games() {
+    use adjourn_client::node::delegate_container;
     use adjourn_client::node::NodeClient;
     use adjourn_core::delegate_api::{Request, Response};
-    use adjourn_ui::node::delegate_container;
 
     let mut client = BrowserClient::connect(NODE_URL)
         .await

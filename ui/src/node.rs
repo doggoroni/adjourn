@@ -210,11 +210,6 @@ mod browser {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
 
-    /// Re-exported for `ui/tests/browser.rs`, which cannot take an
-    /// `adjourn-client` dev-dependency without switching `fake` back on and
-    /// blinding the dependency-graph guard.
-    pub use adjourn_client::node::delegate_container;
-
     /// How long a single request will wait for the node before giving up.
     ///
     /// Mirrors `cli/src/ws.rs`'s `RESPONSE_TIMEOUT`, for the same reason: a
@@ -358,10 +353,27 @@ mod browser {
                 },
             );
 
-            match open_rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => bail!("could not connect to {url}: {e}"),
-                Err(_) => bail!("the WebSocket closed before it opened"),
+            // Bounded, for the same reason every request is. Resolving on
+            // failure closes the refused-connection case -- `onclose` fires
+            // and the handler above fails `open_rx`. It does NOT close the
+            // case where the SYN is silently DROPPED rather than refused (a
+            // firewall, a VPN, a sandboxed CI network): no `onerror`, no
+            // `onclose`, no `onopen`, and nothing to resolve the oneshot. That
+            // is the original hang with a narrower trigger, and it is
+            // indistinguishable from a slow node -- which is exactly the
+            // report-a-healthy-thing-as-broken confusion the rest of this file
+            // exists to avoid. So connect gets the same `RESPONSE_TIMEOUT` as
+            // a request. `next_update` remains the one deliberate exemption:
+            // a correspondence move can take days, but a TCP handshake cannot.
+            let expired = after(RESPONSE_TIMEOUT)?;
+            pin_mut!(expired, open_rx);
+            match select(open_rx, expired).await {
+                Either::Left((Ok(Ok(())), _)) => {}
+                Either::Left((Ok(Err(e)), _)) => bail!("could not connect to {url}: {e}"),
+                Either::Left((Err(_), _)) => bail!("the WebSocket closed before it opened"),
+                Either::Right(((), _)) => {
+                    bail!("timed out after {RESPONSE_TIMEOUT:?} connecting to {url}")
+                }
             }
 
             Ok(Self {
