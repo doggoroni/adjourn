@@ -26,6 +26,11 @@ pub fn GameList(wires: Wires, screen: Signal<Screen>) -> Element {
                                 let label = g.label.clone();
                                 move |_| {
                                     wires.tx.send(Cmd::Open { label: label.clone() });
+                                    // Following is a separate command because
+                                    // `open_game_view`'s GET deliberately does
+                                    // not subscribe -- the one-shot flows share
+                                    // it and must not leave subscriptions behind.
+                                    wires.tx.send(Cmd::Watch { label: label.clone() });
                                     screen.set(Screen::Game(label.clone()));
                                 }
                             },

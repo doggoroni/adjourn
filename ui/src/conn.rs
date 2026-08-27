@@ -53,6 +53,19 @@ pub enum Cmd {
     DrawClaim {
         label: String,
     },
+    /// Follow a bound game live: run until the game ends, updating `view`'s
+    /// `status` after every notification. Sent by the caller right after
+    /// `Open` (see `views/list.rs`), never by a coroutine to itself -- a
+    /// coroutine only gets its `Coroutine` handle back once its body has been
+    /// constructed, so it cannot enqueue its own next command.
+    ///
+    /// This is long-lived by design: it does not return until the game is
+    /// decided. Routed to its own dedicated coroutine below rather than run
+    /// inline in the main actor, so a running watch never blocks resign,
+    /// move, or list-games for the rest of the game.
+    Watch {
+        label: String,
+    },
 }
 
 /// The handle every screen gets: one sender, and the signals results land in.
@@ -90,6 +103,71 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
     let mut error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let mut connected = use_signal(|| false);
+
+    // A dedicated actor for `Watch`, with its own `BrowserClient` connected
+    // to the same node. `next_update` has no request timeout -- a
+    // correspondence move can legitimately take days -- so a watch parks this
+    // coroutine for the whole game. Running it here rather than in the main
+    // actor below is what keeps resign, move, and list-games free for the
+    // whole time a watch is running: two sockets to one local node is cheap,
+    // and each still has exactly one owner, which is the rule that makes
+    // `BrowserClient` (not `Clone`, `&mut self` throughout) safe to hold
+    // across an `.await` at all.
+    let watch_tx = use_coroutine(move |mut rx: UnboundedReceiver<Cmd>| async move {
+        let mut client: Option<BrowserClient> = None;
+
+        while let Some(cmd) = rx.next().await {
+            let Cmd::Watch { label } = cmd else {
+                // Only this coroutine's own command ever arrives here -- see
+                // the forwarding arm in the main actor below -- but ignoring
+                // anything else is cheaper than asserting it can't happen.
+                continue;
+            };
+
+            error.set(None);
+
+            let outcome: anyhow::Result<()> = async {
+                if client.is_none() {
+                    let mut fresh = BrowserClient::connect(&node_url()).await?;
+                    let (container, _key) = delegate_container(crate::DELEGATE_WASM.to_vec());
+                    fresh.register_delegate(container).await?;
+                    client = Some(fresh);
+                }
+                let c = client.as_mut().expect("just connected");
+                let wasm = crate::CONTRACT_WASM.to_vec();
+
+                // `watch_label` runs until the game ends, calling back
+                // after every update. It merges rather than replaces,
+                // and it subscribes -- `open_game_view`'s GET does not,
+                // which is why a watcher needs its own command.
+                let mut view_sig = view;
+                let l = label.clone();
+                session::watch_label(c, &label, wasm, move |status| {
+                    view_sig.with_mut(|v| {
+                        if let Some(v) = v.as_mut() {
+                            if v.label == l {
+                                v.status = status.clone();
+                            }
+                        }
+                    });
+                })
+                .await?;
+                Ok(())
+            }
+            .await;
+
+            if let Err(e) = outcome {
+                // Same rule as the main actor: only a genuine transport death
+                // tears the client down and forces a reconnect (and a fresh
+                // `RegisterDelegate`) on the next watch.
+                let dead = client.as_ref().is_none_or(BrowserClient::is_disconnected);
+                if dead {
+                    client = None;
+                }
+                error.set(Some(format!("{e:#}")));
+            }
+        }
+    });
 
     let tx = use_coroutine(move |mut rx: UnboundedReceiver<Cmd>| async move {
         let mut client: Option<BrowserClient> = None;
@@ -194,6 +272,14 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                     Cmd::DrawClaim { label } => {
                         session::draw_claim(c, &label, wasm.clone()).await?;
                         view.set(Some(session::open_game_view(c, &label, wasm).await?));
+                    }
+                    Cmd::Watch { label } => {
+                        // Forward, don't run: `watch_label` does not return
+                        // until the game ends, and this actor must stay free
+                        // to serve resign, move, and list-games while a watch
+                        // is in progress. The dedicated coroutine above owns
+                        // the actual client and loop.
+                        watch_tx.send(Cmd::Watch { label });
                     }
                 }
                 Ok(())
