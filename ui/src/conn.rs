@@ -233,7 +233,29 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         // (the future was dropped); process it next time
                         // round the loop, without an intervening
                         // `rx.next().await` that would eat a second command.
-                        Ok(Some(won)) => next_cmd = Some(won),
+                        //
+                        // Drop the client with it. `BrowserClient` correlates
+                        // nothing: `next_response` hands back the next Result
+                        // frame off the socket, whichever request it belongs
+                        // to. Cancelling mid-request does not un-send that
+                        // request, so its answer still arrives and is consumed
+                        // by whatever asks next -- every later response is then
+                        // off by one. That is not theoretical: it was observed
+                        // in a browser as a GET failing with the delegate's
+                        // ListGames reply pasted into "unexpected response to
+                        // Get". A cancelled watch therefore leaves a socket
+                        // whose stream cannot be trusted, and the honest thing
+                        // is to reconnect rather than to reason about how many
+                        // answers are outstanding. Reconnecting re-runs
+                        // `register_delegate`, which is safe here: the
+                        // container sets no `predecessors` and its key derives
+                        // from the code alone, so re-registering byte-identical
+                        // code addresses the same generation and does not
+                        // rotate the per-game secret namespace.
+                        Ok(Some(won)) => {
+                            client = None;
+                            next_cmd = Some(won);
+                        }
                         Err(e) => {
                             // Same rule as the main actor: only a genuine
                             // transport death tears the client down and

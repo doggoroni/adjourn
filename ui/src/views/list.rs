@@ -25,12 +25,17 @@ pub fn GameList(wires: Wires, screen: Signal<Screen>) -> Element {
                             onclick: {
                                 let label = g.label.clone();
                                 move |_| {
-                                    wires.tx.send(Cmd::Open { label: label.clone() });
-                                    // Following is a separate command because
                                     // `open_game_view`'s GET deliberately does
                                     // not subscribe -- the one-shot flows share
-                                    // it and must not leave subscriptions behind.
-                                    wires.tx.send(Cmd::Watch { label: label.clone() });
+                                    // it and must not leave subscriptions
+                                    // behind. The subscribing watch is started
+                                    // by `GameScreen`'s own mount effect, and
+                                    // ONLY there: sending `Cmd::Watch` from
+                                    // here too meant every row click raced two
+                                    // watches, and cancelling the first
+                                    // mid-request desynchronises that client's
+                                    // response stream (see `conn.rs`).
+                                    wires.tx.send(Cmd::Open { label: label.clone() });
                                     screen.set(Screen::Game(label.clone()));
                                 }
                             },
