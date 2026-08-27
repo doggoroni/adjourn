@@ -210,6 +210,11 @@ mod browser {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
 
+    /// Re-exported for `ui/tests/browser.rs`, which cannot take an
+    /// `adjourn-client` dev-dependency without switching `fake` back on and
+    /// blinding the dependency-graph guard.
+    pub use adjourn_client::node::delegate_container;
+
     /// How long a single request will wait for the node before giving up.
     ///
     /// Mirrors `cli/src/ws.rs`'s `RESPONSE_TIMEOUT`, for the same reason: a

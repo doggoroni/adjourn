@@ -55,3 +55,4 @@ shakmaty.workspace = true
 # for anyone running a plain `cargo tree` or `cargo test -p adjourn-ui`.
 [dev-dependencies]
 ed25519-dalek.workspace = true
+wasm-bindgen-test = "=0.3.54"
