@@ -58,6 +58,48 @@ async fn a_build_mismatch_is_refused_loudly() {
     );
 }
 
+/// The inviter's own node has never seen the contract when `game_bind` runs
+/// its conditional GET.
+///
+/// Be precise about what this does and does not pin down. It does NOT
+/// reproduce the live `MissingContract` failure, and it passes with or
+/// without the transport fix -- `FakeNode` is a transport, and per
+/// `NodeClient::get`'s contract a correct transport reports absence as
+/// `Ok(None)`, so the error this test is named after can never surface here.
+/// The classification is pinned elsewhere: `node::is_missing_contract`'s two
+/// unit tests, and `ui/tests/routing.rs`'s positive and near-miss cases.
+///
+/// What it does pin is the structural blindness that HID the bug. Every
+/// other test in this file gives both `FakeNode`s the SAME shared `World`,
+/// so by the time `alice` calls `game_bind`, `bob`'s `invite_accept` has
+/// already PUT the contract into that one world and alice's GET always found
+/// it -- the absent branch never ran. Against a real node the two players
+/// are on separate nodes, and the offer conveys only `GameParams` and the
+/// contract id, never the state. Giving each side its own `World` is what
+/// exercises the inviter's PUT-if-absent path at all.
+#[tokio::test]
+async fn the_inviters_first_bind_succeeds_when_its_own_node_has_never_seen_the_contract() {
+    let Some(wasm) = common::contract_wasm() else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+    let mut alice = FakeNode::new(shared_world());
+    let mut bob = FakeNode::new(shared_world());
+
+    let invite = invite_new(&mut alice, "alice", Side::White, ALICE_ENTROPY, NONCE)
+        .await
+        .unwrap();
+    let offer = invite_accept(&mut bob, "bob", &invite, wasm.clone(), BOB_ENTROPY)
+        .await
+        .unwrap();
+
+    // Alice's own node has never PUT or GET this contract -- bob's PUT
+    // landed in his own, separate world. This is the inviter's first-ever
+    // GET for it, exactly the request that fails against a real node.
+    game_bind(&mut alice, "alice", &offer, wasm).await.expect(
+        "the inviter's bind must succeed even though its own node has never seen the contract yet",
+    );
+}
+
 /// Fixed test entropy. `adjourn-client` takes randomness as a parameter (it
 /// must compile for wasm32, where `rand` does not), so tests supply constants
 /// -- deterministic keys and a deterministic contract id, which is strictly

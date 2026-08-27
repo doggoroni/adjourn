@@ -159,6 +159,14 @@ pub enum Routed {
     Failed(String),
     /// The connection is gone. Fatal to everything.
     Closed(String),
+    /// The node has no record of this contract instance --
+    /// `ContractError::MissingContract`. Not a request failure: `get`'s
+    /// `NodeClient` contract treats "the network hasn't seen this contract"
+    /// as `Ok(None)`, the same case `WsClient::get` (`cli/src/ws.rs`) and
+    /// `FakeNode::get` (`client/src/fake.rs`) each classify at their own
+    /// transport boundary. Kept separate from `Failed` rather than folded
+    /// into it so `get` can tell the two apart without re-parsing a string.
+    ContractMissing,
 }
 
 /// Classify one frame. Pure, so it can be tested without a browser.
@@ -166,7 +174,13 @@ pub fn route(frame: Frame) -> Routed {
     match frame {
         Frame::Closed(why) => Routed::Closed(why),
         Frame::Failed(why) => Routed::Failed(why),
-        Frame::Result(Err(e)) => Routed::Failed(e.to_string()),
+        Frame::Result(Err(e)) => {
+            if adjourn_client::node::is_missing_contract(&e) {
+                Routed::ContractMissing
+            } else {
+                Routed::Failed(e.to_string())
+            }
+        }
         Frame::Result(Ok(HostResponse::ContractResponse(
             ContractResponse::UpdateNotification { key, update },
         ))) => Routed::Notification(*key.id(), update),
@@ -372,12 +386,13 @@ mod browser {
             }
         }
 
-        /// The next request answer, parking any notification that arrives first.
-        ///
-        /// Both failure arms end the wait. A `Failed` frame is the node saying
-        /// this request will never be answered; a `Closed` frame is the socket
-        /// saying nothing ever will be.
-        async fn next_response(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+        /// Pull frames until one this connection's callers must react to: a
+        /// response, a failure, a missing-contract report, or the connection
+        /// closing. Notifications along the way are parked in `pending`
+        /// rather than returned -- shared by `next_response`, which turns
+        /// every non-response case into an error, and `get`, which alone
+        /// treats `ContractMissing` as `Ok(None)` rather than a failure.
+        async fn next_routed(&mut self, op: &str) -> anyhow::Result<Routed> {
             // The latch first: a close another waiter already consumed is still
             // a close, and awaiting a frame that can never come would burn the
             // whole timeout before saying so.
@@ -387,15 +402,32 @@ mod browser {
             loop {
                 let routed = route(self.next_frame(op).await?);
                 self.closed.observe(&routed);
-                match routed {
-                    Routed::Response(resp) => return Ok(resp),
-                    Routed::Notification(id, update) => self.pending.push_back((id, update)),
-                    Routed::Failed(why) => {
-                        bail!("the node reported an error while waiting for {op}: {why}")
-                    }
-                    Routed::Closed(why) => {
-                        bail!("the connection closed while waiting for {op}: {why}")
-                    }
+                if let Routed::Notification(id, update) = routed {
+                    self.pending.push_back((id, update));
+                    continue;
+                }
+                return Ok(routed);
+            }
+        }
+
+        /// The next request answer. Every non-response outcome -- a node
+        /// failure, a missing contract, or the connection closing -- is an
+        /// error here; only [`BrowserClient::get`] treats `ContractMissing`
+        /// as anything else.
+        async fn next_response(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+            match self.next_routed(op).await? {
+                Routed::Response(resp) => Ok(resp),
+                Routed::Failed(why) => {
+                    bail!("the node reported an error while waiting for {op}: {why}")
+                }
+                Routed::Closed(why) => {
+                    bail!("the connection closed while waiting for {op}: {why}")
+                }
+                Routed::ContractMissing => {
+                    bail!("the node has no record of this contract while waiting for {op}")
+                }
+                Routed::Notification(..) => {
+                    unreachable!("notifications are drained by next_routed")
                 }
             }
         }
@@ -464,18 +496,31 @@ mod browser {
                 .await
                 .map_err(|e| anyhow!("sending Get: {e}"))?;
             loop {
-                match self.next_response("Get").await? {
-                    HostResponse::ContractResponse(ContractResponse::GetResponse {
-                        state, ..
-                    }) => return Ok(Some(state.as_ref().to_vec())),
-                    HostResponse::ContractResponse(ContractResponse::NotFound { .. }) => {
-                        return Ok(None)
-                    }
+                match self.next_routed("Get").await? {
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::GetResponse { state, .. },
+                    )) => return Ok(Some(state.as_ref().to_vec())),
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::NotFound { .. },
+                    )) => return Ok(None),
                     // A subscribe ack or a stray notification can arrive first.
-                    HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
-                        ..
-                    }) => {}
-                    other => bail!("unexpected response to Get: {other:?}"),
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::SubscribeResponse { .. },
+                    )) => {}
+                    Routed::Response(other) => bail!("unexpected response to Get: {other:?}"),
+                    // The node has no record of this contract -- not a
+                    // request failure, per `NodeClient::get`'s contract (see
+                    // `client/src/node.rs`).
+                    Routed::ContractMissing => return Ok(None),
+                    Routed::Failed(why) => {
+                        bail!("the node reported an error while waiting for Get: {why}")
+                    }
+                    Routed::Closed(why) => {
+                        bail!("the connection closed while waiting for Get: {why}")
+                    }
+                    Routed::Notification(..) => {
+                        unreachable!("notifications are drained by next_routed")
+                    }
                 }
             }
         }
@@ -585,10 +630,11 @@ mod browser {
                     // "no more updates will arrive", which is exactly true.
                     Routed::Closed(_) => return Ok(None),
                     // A late answer -- or a failure the socket survived,
-                    // such as one undecodable frame -- with nobody waiting on
-                    // it. Ending a healthy session over either would be the
-                    // very stall `watch` exists to prevent.
-                    Routed::Response(_) | Routed::Failed(_) => continue,
+                    // such as one undecodable frame or a stray missing-contract
+                    // report -- with nobody waiting on it. Ending a healthy
+                    // session over either would be the very stall `watch`
+                    // exists to prevent.
+                    Routed::Response(_) | Routed::Failed(_) | Routed::ContractMissing => continue,
                 }
             }
         }

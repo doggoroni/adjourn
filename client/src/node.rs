@@ -7,6 +7,7 @@
 use adjourn_core::delegate_api::{Request, Response};
 use adjourn_core::GameParams;
 use anyhow::Context;
+use freenet_stdlib::client_api::{ClientError, ContractError, ErrorKind, RequestError};
 use freenet_stdlib::prelude::*;
 use std::sync::Arc;
 
@@ -15,7 +16,24 @@ use std::sync::Arc;
 // (e.g. `Send` on the returned future) are not a real hazard here.
 #[allow(async_fn_in_trait)]
 pub trait NodeClient {
-    /// `Ok(None)` means the node does not have this contract.
+    /// `Ok(None)` means the network does not have this contract yet -- it has
+    /// never been PUT by anyone this node has synced with. `Err` means the
+    /// GET request itself failed (a timeout, a transport error, a node-side
+    /// execution error unrelated to the contract's presence).
+    ///
+    /// A live `freenet 0.2.130` node answers a GET for a contract it has
+    /// never seen with `Err(ContractError::MissingContract)`, not
+    /// `Ok(None)` -- confirmed against a real node during `adjourn game
+    /// bind`'s inviter path, which GETs before conditionally PUTting
+    /// (`client/src/session.rs::game_bind`). Every implementation of this
+    /// method is responsible for translating that one node-reported case
+    /// into `Ok(None)` itself, using [`is_missing_contract`] to classify on
+    /// the typed `ErrorKind` rather than on the error's rendered message --
+    /// see `cli/src/ws.rs::WsClient::get`, `ui/src/node.rs::BrowserClient::get`
+    /// and `fake.rs::FakeNode::get`. Swallowing every other error the same
+    /// way would be worse than the bug it fixes: a genuine transport failure
+    /// misread as "not present" would make a caller silently PUT over a live
+    /// game's contract.
     async fn get(
         &mut self,
         id: ContractInstanceId,
@@ -47,6 +65,25 @@ pub trait NodeClient {
     async fn next_update(
         &mut self,
     ) -> anyhow::Result<Option<(ContractInstanceId, UpdateData<'static>)>>;
+}
+
+/// Does `err` mean the node has no record of this contract instance at all?
+///
+/// This is the one node-reported failure [`NodeClient::get`] must fold into
+/// `Ok(None)` rather than propagate — see the trait method's doc comment.
+/// Classified on the typed `ErrorKind::RequestError(RequestError::ContractError(
+/// ContractError::MissingContract { .. }))` shape rather than on
+/// `ClientError`'s rendered message, so a future rewording of the node's
+/// error text cannot silently stop this from matching (and so an unrelated
+/// error whose text happens to mention "missing" or "contract" cannot be
+/// mistaken for this one either).
+pub fn is_missing_contract(err: &ClientError) -> bool {
+    matches!(
+        err.kind(),
+        ErrorKind::RequestError(RequestError::ContractError(
+            ContractError::MissingContract { .. }
+        ))
+    )
 }
 
 /// Build the contract container and its instance id from raw cargo WASM.
@@ -83,4 +120,45 @@ pub fn delegate_container(wasm: Vec<u8>) -> (DelegateContainer, DelegateKey) {
         DelegateContainer::Wasm(DelegateWasmAPIVersion::V1(delegate)),
         key,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_missing_contract;
+    use freenet_stdlib::client_api::{ClientError, ContractError, ErrorKind, RequestError};
+    use freenet_stdlib::prelude::ContractInstanceId;
+
+    #[test]
+    fn missing_contract_is_classified_as_such() {
+        let err = ClientError::from(ErrorKind::RequestError(RequestError::ContractError(
+            ContractError::MissingContract {
+                key: ContractInstanceId::new([7u8; 32]),
+            },
+        )));
+        assert!(is_missing_contract(&err));
+    }
+
+    /// A rejected update, a timeout, an execution error -- none of these mean
+    /// the contract is absent, and misreading one as "missing" would let a
+    /// caller silently PUT over a live game's contract.
+    #[test]
+    fn other_errors_are_not_classified_as_missing_contract() {
+        let cases = [
+            ClientError::from(ErrorKind::NodeUnavailable),
+            ClientError::from(ErrorKind::OperationError {
+                cause: "the contract refused the update".into(),
+            }),
+            ClientError::from(ErrorKind::RequestError(RequestError::ContractError(
+                ContractError::MissingRelated {
+                    key: ContractInstanceId::new([7u8; 32]),
+                },
+            ))),
+        ];
+        for err in cases {
+            assert!(
+                !is_missing_contract(&err),
+                "{err:?} must not be classified as a missing contract"
+            );
+        }
+    }
 }

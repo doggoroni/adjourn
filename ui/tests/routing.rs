@@ -1,7 +1,9 @@
 use adjourn_client::node::contract_container;
 use adjourn_core::GameParams;
 use adjourn_ui::node::{route, socket_is_gone, CloseLatch, Frame, Routed};
-use freenet_stdlib::client_api::{ClientError, ContractResponse, ErrorKind, HostResponse};
+use freenet_stdlib::client_api::{
+    ClientError, ContractError, ContractResponse, ErrorKind, HostResponse, RequestError,
+};
 use freenet_stdlib::prelude::*;
 
 /// A real `ContractKey`, taken from a real container.
@@ -79,6 +81,37 @@ fn a_node_reported_error_is_routed_as_a_failure() {
         ),
         other => panic!("expected a failure, got {other:?}"),
     }
+}
+
+/// A live node answers a GET for a contract it has never seen with
+/// `Err(ContractError::MissingContract)`, not `Ok(None)` -- confirmed against
+/// a real `freenet 0.2.130` node. `BrowserClient::get` (`ui/src/node.rs`)
+/// needs to tell this apart from an ordinary failure so it can report
+/// `Ok(None)` instead of propagating an error, which is exactly the bug that
+/// broke `adjourn game bind`'s inviter path when `WsClient` did not.
+#[test]
+fn a_missing_contract_error_is_routed_as_such_not_as_a_failure() {
+    let frame = Frame::Result(Err(ClientError::from(ErrorKind::RequestError(
+        RequestError::ContractError(ContractError::MissingContract { key: *a_key().id() }),
+    ))));
+    match route(frame) {
+        Routed::ContractMissing => {}
+        other => panic!("expected ContractMissing, got {other:?}"),
+    }
+}
+
+/// Classification is on the typed `ErrorKind`, not the message: a different
+/// `ContractError` variant whose text also mentions "contract" must not be
+/// mistaken for a missing one.
+#[test]
+fn a_different_contract_error_is_not_mistaken_for_a_missing_one() {
+    let frame = Frame::Result(Err(ClientError::from(ErrorKind::RequestError(
+        RequestError::ContractError(ContractError::MissingRelated { key: *a_key().id() }),
+    ))));
+    assert!(
+        matches!(route(frame), Routed::Failed(_)),
+        "a related-contract error is a real failure, not a missing-contract report"
+    );
 }
 
 /// A failure is not a response. If it routed as one, the request loop would
