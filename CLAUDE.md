@@ -1127,28 +1127,71 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   exchange could not complete. Fixed at the transport boundary in both
   `WsClient::get` and `BrowserClient::get` — see "UI" above and the "Client"
   section for the full account, including why no `FakeNode` test caught it.
-- **Two `freenet local` nodes on one machine do NOT peer, and the two-node
-  live-update path remains unverified end to end because of that, not because
-  of a UI defect.** Both nodes in `docs/runbook-two-nodes.md`'s setup resolve
-  `mode = "local"` in their generated config — the binary's own `--help`
-  calls this "local-only mode... no real P2P" — so ports 7509 and 7510 never
-  peer, and one node's contract storage is fully isolated from the other's
-  regardless of how many times the same deterministic contract is PUT to
-  each. Driving the UI against this pair confirmed the gap is environmental,
-  not a bug in `conn.rs` or `watch_label`: playing `e2e4` on one node's board
-  advanced that node's own ply from 0 to 1 correctly, while the other node's
-  board stayed at ply 0 — and forcing a fresh `Cmd::Open` on the receiving
-  side (bypassing the watch coroutine entirely, a plain re-GET) returned the
-  same un-advanced state from that node's own storage. The move never left
-  the first node at all; nothing was there for a subscription to miss. Actual
-  peering needs `freenet network --is-gateway` on one side and `freenet
-  network --gateway "host:port,pubkey"` on the other, which
-  `docs/runbook-two-nodes.md` does not set up as written — the runbook's "the
-  other side sees your move" checks in section 4.5 are therefore unverified
-  against this exact setup, and the file has been annotated accordingly. This
-  is exactly the same class of gap `CLAUDE.md` already records for `watch`
-  against `FakeNode` rather than a real node: the mechanism is exercised, the
-  live cross-peer path is not.
+- **Two `freenet local` nodes on one machine do NOT peer** -- but two
+  `freenet network` nodes on one machine DO, and the cross-peer live-update
+  path is now verified end to end. Both halves matter, and the first is what
+  made the second look impossible for a while.
+
+  `freenet local` resolves `mode = "local"` in its generated config -- the
+  binary's own `--help` calls this "local-only mode... no real P2P" -- so two
+  such nodes never peer, and one node's contract storage stays fully isolated
+  from the other's no matter how many times the same deterministic contract is
+  PUT to each. Driving the UI against that pair confirmed the isolation was
+  environmental rather than a bug in `conn.rs` or `watch_label`: playing `e2e4`
+  advanced the acting node's own ply 0 -> 1 while the other node's board stayed
+  at 0, and forcing a fresh `Cmd::Open` on the receiving side (bypassing the
+  watch coroutine entirely, a plain re-GET) returned the same un-advanced state
+  from that node's own storage. The move never left the first node at all;
+  nothing was there for a subscription to miss.
+
+  **Verified 2026-08-27, `freenet 0.2.130`, rustc 1.97.1, branch `views` at
+  `353b77c`, on Arch (Omarchy), both nodes on ONE machine:**
+
+  ```
+  freenet network --is-gateway     --public-network-address 192.168.1.121 --public-network-port 31337     --network-port 31337 --ws-api-port 7509     --skip-load-from-network --disable-auto-update     --data-dir .../alice/data --config-dir .../alice/config
+
+  freenet network     --gateway "192.168.1.121:31337,<64-hex-x25519-pubkey>"     --network-port 31338 --ws-api-port 7510     --skip-load-from-network --disable-auto-update     --data-dir .../bob/data --config-dir .../bob/config
+  ```
+
+  A scholar's-mate line was played alternately against the two nodes. What it
+  established, and the distinction is the useful part:
+
+  - **`e2e4` (ply 1) crossed from Alice's node to Bob's.** Not directly
+    observed in transit, but entailed: `play_move` reads and projects the
+    state from the node it is talking to, so Bob's `e7e5` at ply 2 could not
+    have been signed unless Bob's node already held `e2e4`. The offer blob
+    conveys only `GameParams` and the contract id, never state, and the
+    contract is PUT empty -- so the record reached Bob's node over the
+    network.
+  - **`f1c4` (ply 3) did NOT appear on Bob's node for 90+ seconds** of polling
+    with `adjourn show`, which looks exactly like a propagation failure and is
+    not one. `show` is a one-shot NON-subscribing GET, and a node that already
+    holds some state for a contract serves it locally. Bob had ply 2 and kept
+    answering ply 2.
+  - **`adjourn watch --label bob` returned ply 3 immediately.** `watch_label`
+    issues its own SUBSCRIBING GET and merges what it returns rather than
+    discarding it. That merge is what pulled the missing record.
+
+  So the subscribing-GET merge, whose justification in "Client" below had until
+  now been an argument rather than a measurement, is what makes a peer converge
+  after it has fallen behind. A `watch` built on the non-subscribing GET alone
+  would have sat on ply 2 indefinitely, showing a stale board with no error --
+  the precise failure that section predicts.
+
+  Read the negative result narrowly. It says `show` reports only that node's
+  own storage, which is what `show` is documented to do. It does not say
+  updates fail to propagate to a subscribed peer.
+- **The WASM is byte-identical across two different Linux distributions.**
+  Ubuntu 24.04 under WSL2 and Arch (Omarchy, kernel 7.1.8) both produced
+  contract `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`
+  (267,003 bytes) and delegate
+  `fd77b68107e79c7e3456c267731cf8c61f8039d5a537b2746a7eeb3653c79547`
+  (1,101,953 bytes) from `353b77c` with the pinned toolchain and the build
+  scripts. "Reproducibility holds within one OS" is therefore weaker than what
+  is actually observed: it holds across Linux distros, kernels and libc
+  installs, not merely across machines running the same image. The Windows
+  caveat is unaffected and untested -- the path separator argument still
+  stands.
 
 ## Roadmap
 
@@ -1171,7 +1214,8 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
    node: connecting, listing games, opening a game, and playing a move all
    work. `ui/tests/browser.rs` adds two `wasm-bindgen-test` cases against a
    live node, but they are not wired into CI (no browser, no `geckodriver`
-   there). What remains unverified end to end is the cross-peer live-update
-   path — see "Runtime assumptions, verified" above for why the two-node
-   setup this needs does not currently peer. See "UI" above for exactly what
-   is and is not tested.
+   there). The cross-peer live-update path is
+   now verified too, against two peered `freenet network` nodes -- see
+   "Runtime assumptions, verified" above, including why `adjourn show` reports
+   a stale ply on a node that has not subscribed. See "UI" above for exactly
+   what is and is not tested.

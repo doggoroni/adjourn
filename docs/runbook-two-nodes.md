@@ -3,30 +3,35 @@
 How to play a complete correspondence game across two real `freenet` nodes on
 one machine, each acting as one player.
 
-## Status: wired, partially verified against a live node
+## Status: verified peering and propagation; no full game to mate yet
 
-**Sections 1–3 (build, and starting the two nodes) work today.** Section 4
-(the `adjourn` game commands: `init`, `invite`, `game bind`, `move`, `show`,
-...) is now wired: `cli/src/main.rs` routes every command below to
-`adjourn_client::session`. `watch` is now implemented too: it subscribes to
-the contract and streams every update until the game ends. It has been
-exercised against `FakeNode`, not yet against a live node — poll with
-`adjourn show` if it misbehaves.
+**Sections 1-3 (build, starting the nodes) work today**, and section 2b's
+peered pair is verified. Section 4 (`init`, `invite`, `game bind`, `move`,
+`show`, `watch`) is wired: `cli/src/main.rs` routes every command to
+`adjourn_client::session`.
 
 Against a real `freenet 0.2.130` node on 2026-08-24: `adjourn init`
 registered the delegate, `adjourn key new` returned a key, and `adjourn
-invite accept` successfully bound a game that `adjourn game list` then
-showed — see `CLAUDE.md`, "Runtime assumptions, verified", for what that
-confirms about `MessageOrigin` and about the delegate/contract running under
-wasmtime. Playing a full game to mate through this runbook has not yet been
-recorded here; do that next and update this section with the result.
+invite accept` bound a game that `adjourn game list` then showed -- see
+`CLAUDE.md`, "Runtime assumptions, verified", for what that confirms about
+`MessageOrigin` and about the delegate and contract running under wasmtime.
 
-This host (Windows, no linker for `dlltool.exe`, no local Freenet node)
-cannot itself run any of this — Task 9 here was verified with `cargo
-check`/`cargo clippy -p adjourn-cli --all-targets` only, plus the `FakeNode`
-test suite, which runs the real contract and delegate code but never touches
-a WebSocket or a real `freenet` process. The live-node confirmation above was
-run and reported separately, on Linux.
+**On 2026-08-27, on Arch (Omarchy), two PEERED `freenet network` nodes on one
+machine carried moves between them** -- the cross-peer path this file
+previously said was out of scope. `e2e4` reached the second node (entailed:
+its `e7e5` could not have been signed otherwise), and `f1c4` reached it via
+`adjourn watch`, which subscribes. `watch` is therefore now exercised against
+a live node, not only against `FakeNode`.
+
+Two things still NOT recorded here, stated plainly so the gap does not get
+rounded off:
+
+- **No full game to mate has been played through this runbook.** The verified
+  run reached ply 3. The scholar's-mate line in section 4.5 is still
+  unexercised past that point.
+- **`adjourn show` polling did NOT see the propagated move**, and that is
+  correct behaviour rather than a defect -- see section 2b's "Reading the
+  result correctly". Use `watch` to confirm propagation.
 
 ## 0. Prerequisites
 
@@ -68,22 +73,23 @@ commands below to PowerShell as needed; the `freenet` flags are the same.)
 
 ## 2. Start the two nodes
 
-**This runbook, as written, does NOT make the two nodes peer.** `freenet
-local` resolves `mode = "local"` in the config it generates — the binary's
-own `--help` describes this as "local-only mode... no real P2P" — so the two
-node processes below are fully isolated single-node instances, each with its
-own on-disk contract/delegate/db state, with no gateway or peer relationship
-between them. PUTting the same deterministic contract (same code, same
-`GameParams`) onto both gives each an independently-initialized copy, not a
-shared, synchronized one: a move signed against Alice's copy never reaches
-Bob's. This was confirmed while driving the UI against exactly this setup —
-see `CLAUDE.md`'s "Runtime assumptions, verified" — where playing a move
-advanced the acting node's own ply correctly while the other node's storage,
-checked directly, stayed unmoved. Section 4.5's "confirm the other side sees
-it" step below is therefore **not achievable with the setup as written**; it
-would need real peering (`freenet network --is-gateway ...` on one side,
-`freenet network --gateway "host:port,pubkey" ...` on the other), which is
-out of scope for this runbook.
+**`freenet local` does NOT make the two nodes peer -- use `freenet network`
+instead if you want a move to cross.** `freenet local` resolves `mode =
+"local"` in the config it generates, which the binary's own `--help` describes
+as "local-only mode... no real P2P". Two such nodes are fully isolated
+single-node instances, each with its own on-disk contract/delegate/db state.
+PUTting the same deterministic contract (same code, same `GameParams`) onto
+both gives each an independently-initialized copy, not a shared one: a move
+signed against Alice's copy never reaches Bob's. Confirmed by driving the UI
+against exactly this pair -- see `CLAUDE.md`, "Runtime assumptions, verified".
+
+The `freenet local` pair below is still worth running: it exercises the
+delegate, the contract under wasmtime, key creation, the invite exchange and
+each node's own state, which is what every earlier live run here used. It
+simply cannot carry a move between nodes.
+
+**For propagation, use section 2b.** Both nodes can still live on one machine
+-- you do not need two.
 
 `freenet local` runs a node in local (no real P2P) mode. Each flag below is
 namespaced per node so the two can run on one machine without colliding:
@@ -115,6 +121,51 @@ Leave both running in the foreground. Each node's WebSocket API is now at:
 
 - Alice: `ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native`
 - Bob: `ws://127.0.0.1:7510/v1/contract/command?encodingProtocol=native`
+
+## 2b. Two nodes that actually peer, on one machine
+
+Verified 2026-08-27 against `freenet 0.2.130` on Arch (Omarchy), branch
+`views` at `353b77c`. `--is-gateway` on one side, `--gateway` on the other.
+The gateway's `--public-network-address` can be the machine's own LAN address
+even when both nodes are local to it.
+
+**Alice, the gateway:**
+
+```bash
+freenet network --is-gateway   --public-network-address 192.168.1.121   --public-network-port 31337   --network-port 31337   --ws-api-port 7509   --skip-load-from-network   --disable-auto-update   --data-dir "$ALICE_DIR/data" --config-dir "$ALICE_DIR/config"
+```
+
+**Bob, the peer:**
+
+```bash
+freenet network   --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31338   --ws-api-port 7510   --skip-load-from-network   --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
+```
+
+`--gateway` takes `"ip:port,hex-pubkey"`, where the key is the gateway's
+64-character hex X25519 public key. Start the gateway first and take the key
+from its startup output or its `--config-dir`; no `freenet` subcommand prints
+it on request.
+
+`--skip-load-from-network` keeps the pair from reaching for the public gateway
+index -- a gateway always runs isolated under it anyway, and supplying an
+explicit `--gateway` entry makes the CLI entries REPLACE the on-disk
+`gateways.toml` cache rather than merge with it.
+
+### Reading the result correctly -- this part is a trap
+
+With the peered pair, a move DOES cross. But **`adjourn show` will not
+necessarily show you that**, and mistaking its answer for a propagation
+failure costs an hour.
+
+`show` performs a one-shot NON-subscribing GET, and a node that already holds
+some state for a contract serves it locally rather than re-fetching. In the
+verified run, Bob's node sat at ply 2 through 90 seconds of polling with
+`show` while Alice was at ply 3. Running `adjourn watch --label bob` returned
+ply 3 immediately: `watch_label` issues its own SUBSCRIBING GET and merges
+what comes back, and that merge is what pulls a record the node had missed.
+
+So: **use `watch` to confirm propagation, not `show`.** `show` answers "what
+does this node already have", which is a different and much narrower question.
 
 ### The two facts that cost real time to learn
 
