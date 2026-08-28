@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use adjourn_core::delegate_api::{EntropyQuality, GameId};
-use adjourn_core::delegate_policy::GameRecord;
+use adjourn_core::delegate_policy::{migrate_record, GameRecord};
 use freenet_stdlib::prelude::DelegateCtx;
 
 /// The delegate's persistence, abstracted so the handlers can run off-wasm.
@@ -119,7 +119,10 @@ pub fn load_bound_game_id<S: SecretStore>(store: &S, label: &str) -> Option<Game
 
 pub fn load_game<S: SecretStore>(store: &S, game_id: &GameId) -> Option<GameRecord> {
     let bytes = store.get(&game_secret(game_id))?;
-    ciborium::from_reader(bytes.as_slice()).ok()
+    let rec: GameRecord = ciborium::from_reader(bytes.as_slice()).ok()?;
+    // ONE migration point, so no caller can forget. The per-decision format
+    // checks stay as defence in depth.
+    migrate_record(rec)
 }
 
 /// The origin (contract instance id) that created the key for `label`, if any.

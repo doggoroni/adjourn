@@ -1,7 +1,7 @@
 use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
-    classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
-    HostEntropy, SignDecision, GAME_RECORD_FORMAT,
+    classify_host_entropy, decide_bind, decide_sign, derive_seed, migrate_record, BindDecision,
+    GameRecord, HostEntropy, SignDecision, GAME_RECORD_FORMAT,
 };
 use adjourn_core::{Body, GameParams, MAX_PLY};
 use ed25519_dalek::SigningKey;
@@ -487,8 +487,8 @@ fn rebinding_from_a_different_origin_is_refused() {
 }
 
 #[test]
-fn the_record_format_is_now_two() {
-    assert_eq!(GAME_RECORD_FORMAT, 2);
+fn the_record_format_is_now_three() {
+    assert_eq!(GAME_RECORD_FORMAT, 3);
 }
 
 #[test]
@@ -666,4 +666,81 @@ fn the_new_and_changed_bodies_round_trip_through_cbor() {
             "round-tripped record must still verify"
         );
     }
+}
+
+fn sample_record() -> GameRecord {
+    let (_w, _b, params) = game();
+    GameRecord {
+        format: GAME_RECORD_FORMAT,
+        label: "alice".into(),
+        params,
+        side: Side::White,
+        origin: None,
+        contract: [3u8; 32],
+        previous: None,
+        entropy: EntropyQuality::HostBacked,
+        last_signed_ply: 0,
+        last_move_body_hash: [0u8; 32],
+    }
+}
+
+/// A format-2 record must be UPGRADED, not rejected. Refusing it would break
+/// every game already bound — the games this feature exists to save.
+#[test]
+fn a_format_2_record_migrates_to_the_current_format() {
+    let mut old = sample_record();
+    old.format = 2;
+    old.previous = None;
+    old.last_signed_ply = 7;
+
+    let migrated = migrate_record(old.clone()).expect("format 2 must migrate");
+    assert_eq!(migrated.format, GAME_RECORD_FORMAT);
+    assert_eq!(
+        migrated.previous, None,
+        "a format-2 record has no previous id"
+    );
+}
+
+/// The whole point of the format field. If migration silently zeroed this,
+/// the double-sign guard would be disarmed on a live game.
+#[test]
+fn migration_preserves_last_signed_ply_and_every_other_field() {
+    let mut old = sample_record();
+    old.format = 2;
+    old.last_signed_ply = 9;
+    old.last_move_body_hash = [7u8; 32];
+
+    let migrated = migrate_record(old.clone()).expect("format 2 must migrate");
+    assert_eq!(
+        migrated.last_signed_ply, 9,
+        "ply counter must survive migration"
+    );
+    assert_eq!(migrated.last_move_body_hash, [7u8; 32]);
+    assert_eq!(migrated.label, old.label);
+    assert_eq!(migrated.params, old.params);
+    assert_eq!(migrated.side, old.side);
+    assert_eq!(migrated.origin, old.origin);
+    assert_eq!(migrated.contract, old.contract);
+    assert_eq!(migrated.entropy, old.entropy);
+}
+
+/// Migrate the shapes we know; refuse the rest. Never widen the check.
+#[test]
+fn an_unknown_format_does_not_migrate() {
+    for bad in [0u8, 1, 4, 255] {
+        let mut rec = sample_record();
+        rec.format = bad;
+        assert!(
+            migrate_record(rec).is_none(),
+            "format {bad} must not migrate — widening this check is how a \
+             future layout gets silently misread"
+        );
+    }
+}
+
+#[test]
+fn a_current_format_record_passes_through_unchanged() {
+    let rec = sample_record();
+    assert_eq!(rec.format, GAME_RECORD_FORMAT);
+    assert_eq!(migrate_record(rec.clone()), Some(rec));
 }
