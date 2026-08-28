@@ -151,15 +151,35 @@ impl NodeClient for FakeNode {
         id: ContractInstanceId,
         subscribe: bool,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let world = self.world.lock().expect("world lock poisoned");
-        if subscribe {
-            // `or_insert`, not `insert`: re-subscribing must not move an
-            // existing subscription's start point forward past entries it has
-            // not delivered yet.
-            let now = world.log.len();
-            self.subscribed.entry(*id).or_insert(now);
-        }
-        Ok(world.contracts.get(&*id).map(|(_, state)| state.clone()))
+        let state = {
+            let world = self.world.lock().expect("world lock poisoned");
+            if subscribe {
+                // `or_insert`, not `insert`: re-subscribing must not move an
+                // existing subscription's start point forward past entries it
+                // has not delivered yet.
+                let now = world.log.len();
+                self.subscribed.entry(*id).or_insert(now);
+            }
+            world.contracts.get(&*id).map(|(_, state)| state.clone())
+        };
+        // `Ok(None)` here, deliberately, even though a live node answers a
+        // GET for a contract it has never seen with
+        // `Err(ContractError::MissingContract)` rather than `Ok(None)` --
+        // confirmed against a real `freenet 0.2.130` node during `adjourn
+        // game bind`'s inviter path. `NodeClient::get`'s contract makes each
+        // transport responsible for folding that one error into `Ok(None)`
+        // itself (see `cli/src/ws.rs` and `ui/src/node.rs`), so a correct
+        // fake reports absence the same way a correct real transport does.
+        //
+        // The point worth keeping: this fake CANNOT reproduce that bug, and
+        // no test driven through it ever could. What hid the bug was not this
+        // return value but the shared `World` -- every test ran both players
+        // against one world, where the accepter's unconditional PUT had
+        // already populated the contract by the time the inviter's
+        // conditional GET looked, so the absent case never arose at all. The
+        // classification itself is pinned by `node::is_missing_contract`'s
+        // unit tests and by `ui/tests/routing.rs`, not from here.
+        Ok(state)
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {

@@ -159,6 +159,14 @@ pub enum Routed {
     Failed(String),
     /// The connection is gone. Fatal to everything.
     Closed(String),
+    /// The node has no record of this contract instance --
+    /// `ContractError::MissingContract`. Not a request failure: `get`'s
+    /// `NodeClient` contract treats "the network hasn't seen this contract"
+    /// as `Ok(None)`, the same case `WsClient::get` (`cli/src/ws.rs`) and
+    /// `FakeNode::get` (`client/src/fake.rs`) each classify at their own
+    /// transport boundary. Kept separate from `Failed` rather than folded
+    /// into it so `get` can tell the two apart without re-parsing a string.
+    ContractMissing,
 }
 
 /// Classify one frame. Pure, so it can be tested without a browser.
@@ -166,7 +174,13 @@ pub fn route(frame: Frame) -> Routed {
     match frame {
         Frame::Closed(why) => Routed::Closed(why),
         Frame::Failed(why) => Routed::Failed(why),
-        Frame::Result(Err(e)) => Routed::Failed(e.to_string()),
+        Frame::Result(Err(e)) => {
+            if adjourn_client::node::is_missing_contract(&e) {
+                Routed::ContractMissing
+            } else {
+                Routed::Failed(e.to_string())
+            }
+        }
         Frame::Result(Ok(HostResponse::ContractResponse(
             ContractResponse::UpdateNotification { key, update },
         ))) => Routed::Notification(*key.id(), update),
@@ -339,10 +353,27 @@ mod browser {
                 },
             );
 
-            match open_rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => bail!("could not connect to {url}: {e}"),
-                Err(_) => bail!("the WebSocket closed before it opened"),
+            // Bounded, for the same reason every request is. Resolving on
+            // failure closes the refused-connection case -- `onclose` fires
+            // and the handler above fails `open_rx`. It does NOT close the
+            // case where the SYN is silently DROPPED rather than refused (a
+            // firewall, a VPN, a sandboxed CI network): no `onerror`, no
+            // `onclose`, no `onopen`, and nothing to resolve the oneshot. That
+            // is the original hang with a narrower trigger, and it is
+            // indistinguishable from a slow node -- which is exactly the
+            // report-a-healthy-thing-as-broken confusion the rest of this file
+            // exists to avoid. So connect gets the same `RESPONSE_TIMEOUT` as
+            // a request. `next_update` remains the one deliberate exemption:
+            // a correspondence move can take days, but a TCP handshake cannot.
+            let expired = after(RESPONSE_TIMEOUT)?;
+            pin_mut!(expired, open_rx);
+            match select(open_rx, expired).await {
+                Either::Left((Ok(Ok(())), _)) => {}
+                Either::Left((Ok(Err(e)), _)) => bail!("could not connect to {url}: {e}"),
+                Either::Left((Err(_), _)) => bail!("the WebSocket closed before it opened"),
+                Either::Right(((), _)) => {
+                    bail!("timed out after {RESPONSE_TIMEOUT:?} connecting to {url}")
+                }
             }
 
             Ok(Self {
@@ -372,12 +403,13 @@ mod browser {
             }
         }
 
-        /// The next request answer, parking any notification that arrives first.
-        ///
-        /// Both failure arms end the wait. A `Failed` frame is the node saying
-        /// this request will never be answered; a `Closed` frame is the socket
-        /// saying nothing ever will be.
-        async fn next_response(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+        /// Pull frames until one this connection's callers must react to: a
+        /// response, a failure, a missing-contract report, or the connection
+        /// closing. Notifications along the way are parked in `pending`
+        /// rather than returned -- shared by `next_response`, which turns
+        /// every non-response case into an error, and `get`, which alone
+        /// treats `ContractMissing` as `Ok(None)` rather than a failure.
+        async fn next_routed(&mut self, op: &str) -> anyhow::Result<Routed> {
             // The latch first: a close another waiter already consumed is still
             // a close, and awaiting a frame that can never come would burn the
             // whole timeout before saying so.
@@ -387,17 +419,46 @@ mod browser {
             loop {
                 let routed = route(self.next_frame(op).await?);
                 self.closed.observe(&routed);
-                match routed {
-                    Routed::Response(resp) => return Ok(resp),
-                    Routed::Notification(id, update) => self.pending.push_back((id, update)),
-                    Routed::Failed(why) => {
-                        bail!("the node reported an error while waiting for {op}: {why}")
-                    }
-                    Routed::Closed(why) => {
-                        bail!("the connection closed while waiting for {op}: {why}")
-                    }
+                if let Routed::Notification(id, update) = routed {
+                    self.pending.push_back((id, update));
+                    continue;
+                }
+                return Ok(routed);
+            }
+        }
+
+        /// The next request answer. Every non-response outcome -- a node
+        /// failure, a missing contract, or the connection closing -- is an
+        /// error here; only [`BrowserClient::get`] treats `ContractMissing`
+        /// as anything else.
+        async fn next_response(&mut self, op: &str) -> anyhow::Result<HostResponse> {
+            match self.next_routed(op).await? {
+                Routed::Response(resp) => Ok(resp),
+                Routed::Failed(why) => {
+                    bail!("the node reported an error while waiting for {op}: {why}")
+                }
+                Routed::Closed(why) => {
+                    bail!("the connection closed while waiting for {op}: {why}")
+                }
+                Routed::ContractMissing => {
+                    bail!("the node has no record of this contract while waiting for {op}")
+                }
+                Routed::Notification(..) => {
+                    unreachable!("notifications are drained by next_routed")
                 }
             }
+        }
+
+        /// Whether the underlying socket is known dead — a genuine close or
+        /// send-side failure the transport classified as [`socket_is_gone`],
+        /// latched the first time it is observed (see [`CloseLatch`]).
+        ///
+        /// This is the line the actor in `conn.rs` needs: a node-reported
+        /// refusal, an out-of-turn move, a bad paste -- none of those touch
+        /// the socket, so none of them should tear down a healthy connection
+        /// or re-run delegate registration. Only a transport death should.
+        pub fn is_disconnected(&self) -> bool {
+            self.closed.why().is_some()
         }
 
         pub async fn register_delegate(
@@ -452,18 +513,31 @@ mod browser {
                 .await
                 .map_err(|e| anyhow!("sending Get: {e}"))?;
             loop {
-                match self.next_response("Get").await? {
-                    HostResponse::ContractResponse(ContractResponse::GetResponse {
-                        state, ..
-                    }) => return Ok(Some(state.as_ref().to_vec())),
-                    HostResponse::ContractResponse(ContractResponse::NotFound { .. }) => {
-                        return Ok(None)
-                    }
+                match self.next_routed("Get").await? {
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::GetResponse { state, .. },
+                    )) => return Ok(Some(state.as_ref().to_vec())),
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::NotFound { .. },
+                    )) => return Ok(None),
                     // A subscribe ack or a stray notification can arrive first.
-                    HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
-                        ..
-                    }) => {}
-                    other => bail!("unexpected response to Get: {other:?}"),
+                    Routed::Response(HostResponse::ContractResponse(
+                        ContractResponse::SubscribeResponse { .. },
+                    )) => {}
+                    Routed::Response(other) => bail!("unexpected response to Get: {other:?}"),
+                    // The node has no record of this contract -- not a
+                    // request failure, per `NodeClient::get`'s contract (see
+                    // `client/src/node.rs`).
+                    Routed::ContractMissing => return Ok(None),
+                    Routed::Failed(why) => {
+                        bail!("the node reported an error while waiting for Get: {why}")
+                    }
+                    Routed::Closed(why) => {
+                        bail!("the connection closed while waiting for Get: {why}")
+                    }
+                    Routed::Notification(..) => {
+                        unreachable!("notifications are drained by next_routed")
+                    }
                 }
             }
         }
@@ -483,13 +557,9 @@ mod browser {
                 }))
                 .await
                 .map_err(|e| anyhow!("sending Put: {e}"))?;
-            loop {
-                match self.next_response("Put").await? {
-                    HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => {
-                        return Ok(())
-                    }
-                    other => bail!("unexpected response to Put: {other:?}"),
-                }
+            match self.next_response("Put").await? {
+                HostResponse::ContractResponse(ContractResponse::PutResponse { .. }) => Ok(()),
+                other => bail!("unexpected response to Put: {other:?}"),
             }
         }
 
@@ -501,13 +571,9 @@ mod browser {
                 }))
                 .await
                 .map_err(|e| anyhow!("sending Update: {e}"))?;
-            loop {
-                match self.next_response("Update").await? {
-                    HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => {
-                        return Ok(())
-                    }
-                    other => bail!("unexpected response to Update: {other:?}"),
-                }
+            match self.next_response("Update").await? {
+                HostResponse::ContractResponse(ContractResponse::UpdateResponse { .. }) => Ok(()),
+                other => bail!("unexpected response to Update: {other:?}"),
             }
         }
 
@@ -528,20 +594,17 @@ mod browser {
                 ))
                 .await
                 .map_err(|e| anyhow!("sending delegate call: {e}"))?;
-            loop {
-                match self.next_response("delegate call").await? {
-                    HostResponse::DelegateResponse { values, .. } => {
-                        for msg in values {
-                            if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
-                                return Response::decode(&app.payload).map_err(|e| {
-                                    anyhow!("delegate sent an undecodable reply: {e:?}")
-                                });
-                            }
+            match self.next_response("delegate call").await? {
+                HostResponse::DelegateResponse { values, .. } => {
+                    for msg in values {
+                        if let OutboundDelegateMsg::ApplicationMessage(app) = msg {
+                            return Response::decode(&app.payload)
+                                .map_err(|e| anyhow!("delegate sent an undecodable reply: {e:?}"));
                         }
-                        bail!("delegate returned no application message")
                     }
-                    other => bail!("unexpected response to delegate call: {other:?}"),
+                    bail!("delegate returned no application message")
                 }
+                other => bail!("unexpected response to delegate call: {other:?}"),
             }
         }
 
@@ -573,10 +636,11 @@ mod browser {
                     // "no more updates will arrive", which is exactly true.
                     Routed::Closed(_) => return Ok(None),
                     // A late answer -- or a failure the socket survived,
-                    // such as one undecodable frame -- with nobody waiting on
-                    // it. Ending a healthy session over either would be the
-                    // very stall `watch` exists to prevent.
-                    Routed::Response(_) | Routed::Failed(_) => continue,
+                    // such as one undecodable frame or a stray missing-contract
+                    // report -- with nobody waiting on it. Ending a healthy
+                    // session over either would be the very stall `watch`
+                    // exists to prevent.
+                    Routed::Response(_) | Routed::Failed(_) | Routed::ContractMissing => continue,
                 }
             }
         }
@@ -589,6 +653,22 @@ mod browser {
     /// imports, which is what makes a contract fail to instantiate.
     pub fn browser_entropy() -> anyhow::Result<[u8; 32]> {
         let mut bytes = [0u8; 32];
+        web_sys::window()
+            .ok_or_else(|| anyhow!("no window"))?
+            .crypto()
+            .map_err(|e| anyhow!("no crypto: {e:?}"))?
+            .get_random_values_with_u8_array(&mut bytes)
+            .map_err(|e| anyhow!("crypto.getRandomValues failed: {e:?}"))?;
+        Ok(bytes)
+    }
+
+    /// 16 bytes from the browser's CSPRNG, for an invite's nonce.
+    ///
+    /// The nonce distinguishes repeat matchups between the same two players and
+    /// has exactly one author, the inviter — that is what stops the two sides
+    /// deriving different `GameParams`.
+    pub fn browser_nonce() -> anyhow::Result<[u8; 16]> {
+        let mut bytes = [0u8; 16];
         web_sys::window()
             .ok_or_else(|| anyhow!("no window"))?
             .crypto()

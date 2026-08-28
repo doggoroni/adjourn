@@ -3,30 +3,41 @@
 How to play a complete correspondence game across two real `freenet` nodes on
 one machine, each acting as one player.
 
-## Status: wired, partially verified against a live node
+## Status: verified end to end -- peering, propagation, and a full game to mate
 
-**Sections 1–3 (build, and starting the two nodes) work today.** Section 4
-(the `adjourn` game commands: `init`, `invite`, `game bind`, `move`, `show`,
-...) is now wired: `cli/src/main.rs` routes every command below to
-`adjourn_client::session`. `watch` is now implemented too: it subscribes to
-the contract and streams every update until the game ends. It has been
-exercised against `FakeNode`, not yet against a live node — poll with
-`adjourn show` if it misbehaves.
+**Sections 1-3 (build, starting the nodes) work today**, and section 2b's
+peered pair is verified. Section 4 (`init`, `invite`, `game bind`, `move`,
+`show`, `watch`) is wired: `cli/src/main.rs` routes every command to
+`adjourn_client::session`.
 
 Against a real `freenet 0.2.130` node on 2026-08-24: `adjourn init`
 registered the delegate, `adjourn key new` returned a key, and `adjourn
-invite accept` successfully bound a game that `adjourn game list` then
-showed — see `CLAUDE.md`, "Runtime assumptions, verified", for what that
-confirms about `MessageOrigin` and about the delegate/contract running under
-wasmtime. Playing a full game to mate through this runbook has not yet been
-recorded here; do that next and update this section with the result.
+invite accept` bound a game that `adjourn game list` then showed -- see
+`CLAUDE.md`, "Runtime assumptions, verified", for what that confirms about
+`MessageOrigin` and about the delegate and contract running under wasmtime.
 
-This host (Windows, no linker for `dlltool.exe`, no local Freenet node)
-cannot itself run any of this — Task 9 here was verified with `cargo
-check`/`cargo clippy -p adjourn-cli --all-targets` only, plus the `FakeNode`
-test suite, which runs the real contract and delegate code but never touches
-a WebSocket or a real `freenet` process. The live-node confirmation above was
-run and reported separately, on Linux.
+**On 2026-08-27, on Arch (Omarchy), two PEERED `freenet network` nodes on one
+machine carried moves between them** -- the cross-peer path this file
+previously said was out of scope. `e2e4` reached the second node (entailed:
+its `e7e5` could not have been signed otherwise), and `f1c4` reached it via
+`adjourn watch`, which subscribes. `watch` is therefore now exercised against
+a live node, not only against `FakeNode`.
+
+Two things still NOT recorded here, stated plainly so the gap does not get
+rounded off:
+
+- **A full game to mate HAS now been played**, on a three-node topology (a
+  dedicated gateway holding no player, plus two player peers). Both nodes
+  independently reported ply 7, the same FEN, and "White wins -- checkmate",
+  on the same contract id -- which is also the direct observation that both
+  players derived identical `GameParams`. See `CLAUDE.md`, "Runtime
+  assumptions, verified".
+- **A node that misses an update recovers**, without needing to subscribe --
+  verified both for a never-subscribed node and for one killed and restarted
+  across the update. See section 2b.
+- **The two-node shape (a player doubling as the gateway) is not reliable** --
+  reported as failing to complete a game across two attempts. Use the
+  three-node shape.
 
 ## 0. Prerequisites
 
@@ -68,6 +79,24 @@ commands below to PowerShell as needed; the `freenet` flags are the same.)
 
 ## 2. Start the two nodes
 
+**`freenet local` does NOT make the two nodes peer -- use `freenet network`
+instead if you want a move to cross.** `freenet local` resolves `mode =
+"local"` in the config it generates, which the binary's own `--help` describes
+as "local-only mode... no real P2P". Two such nodes are fully isolated
+single-node instances, each with its own on-disk contract/delegate/db state.
+PUTting the same deterministic contract (same code, same `GameParams`) onto
+both gives each an independently-initialized copy, not a shared one: a move
+signed against Alice's copy never reaches Bob's. Confirmed by driving the UI
+against exactly this pair -- see `CLAUDE.md`, "Runtime assumptions, verified".
+
+The `freenet local` pair below is still worth running: it exercises the
+delegate, the contract under wasmtime, key creation, the invite exchange and
+each node's own state, which is what every earlier live run here used. It
+simply cannot carry a move between nodes.
+
+**For propagation, use section 2b.** Both nodes can still live on one machine
+-- you do not need two.
+
 `freenet local` runs a node in local (no real P2P) mode. Each flag below is
 namespaced per node so the two can run on one machine without colliding:
 `--ws-api-port` for the client API, `--network-port` for the node's own
@@ -98,6 +127,172 @@ Leave both running in the foreground. Each node's WebSocket API is now at:
 
 - Alice: `ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native`
 - Bob: `ws://127.0.0.1:7510/v1/contract/command?encodingProtocol=native`
+
+## 2b. Two nodes that actually peer, on one machine
+
+Verified 2026-08-27 against `freenet 0.2.130` on Arch (Omarchy), branch
+`views` at `353b77c`. `--is-gateway` on one side, `--gateway` on the other.
+The gateway's `--public-network-address` can be the machine's own LAN address
+even when both nodes are local to it.
+
+**Alice, the gateway:**
+
+```bash
+freenet network --is-gateway   --public-network-address 192.168.1.121   --public-network-port 31337   --network-port 31337   --ws-api-port 7509   --skip-load-from-network   --disable-auto-update   --data-dir "$ALICE_DIR/data" --config-dir "$ALICE_DIR/config"
+```
+
+**Bob, the peer:**
+
+```bash
+freenet network   --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31338   --ws-api-port 7510   --skip-load-from-network   --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
+```
+
+### Getting the gateway's public key: you must DERIVE it
+
+`--gateway` takes `"ip:port,hex-pubkey"`. **The gateway never prints or stores
+its own public key.** There is no startup banner, no subcommand, and nothing
+under its `--data-dir` or `--config-dir` contains it. Two operators searched
+independently and found nothing; do not go looking.
+
+What the gateway stores is the PRIVATE key:
+
+```
+<data-dir>/secrets/transport_keypair
+```
+
+Despite the name, that file holds a single 32-byte X25519 private scalar as 64
+ASCII hex characters, no trailing newline. The public key is that scalar
+multiplied by the X25519 base point. Derive it:
+
+```bash
+SK=$(cat "$GW_DIR/data/secrets/transport_keypair")
+python3 -c "
+open('/tmp/k.der','wb').write(bytes.fromhex('302e020100300506032b656e04220420'+'$SK'.strip()))"
+openssl pkey -inform DER -in /tmp/k.der -pubout -outform DER   | python3 -c "import sys; print(sys.stdin.buffer.read()[-32:].hex())"
+rm -f /tmp/k.der
+```
+
+`302e020100300506032b656e04220420` is the PKCS#8 DER wrapper for a raw X25519
+private key; `openssl` does the multiplication and `-pubout -outform DER`
+emits SPKI, whose last 32 bytes are the raw public key. Verified twice, by two
+operators independently: the derived value is byte-identical to the
+`--gateway` argument the live peers are connected with.
+
+**Document the derivation, never a key.** The keypair regenerates with every
+fresh `--data-dir` -- three runs on one machine produced three different
+gateway keys. Anyone copying a literal key out of documentation gets a
+handshake failure.
+
+**Ordering constraint:** `transport_keypair` does not exist until the gateway
+has started once, so you cannot construct the peers' `--gateway` argument
+until after the gateway's first boot. Start it, wait for the file (~12s), then
+derive and start the peers.
+
+**A naming trap in the same directory:** the sibling files
+`public.nova.gw.pem` and `public.vega.gw.pem` are NOT PEM despite the
+extension. They use the same bare 64-hex-character format as
+`transport_keypair`, which makes a public key and a private key visually
+indistinguishable on disk. Check which file you are reading before you paste
+it anywhere.
+
+### Two flags that are not optional
+
+Both were learned the hard way, and both fail in ways that look like something
+else:
+
+- **`--disable-auto-update` is MANDATORY.** GitHub now publishes 0.2.131, so a
+  pinned 0.2.130 node logs "Startup check: newer version on GitHub, triggering
+  auto-update" and **exits with code 42 about 58 seconds in**. Without this
+  flag your nodes silently drift to different versions mid-game, which is the
+  same class of failure as a WASM hash mismatch wearing a different hat -- and
+  this project's whole contract-key discipline exists to prevent exactly that.
+- **`--skip-load-from-network` is REQUIRED for isolation.** Without it a
+  gateway loads the public gateway index and **joins the real Freenet
+  network** -- observed with 6 live peers and telemetry going to
+  `nova.locut.us:4318`. A gateway is not isolated by default, and the `--help`
+  wording is easy to misread as implying it is.
+
+### The three-node shape, which is what actually played a full game
+
+The pair above (one player doubling as the gateway) works and is verified.
+But the topology that carried a game to mate uses a **dedicated gateway
+holding no player**, plus two player peers dialling it. Prefer it: neither
+player needs a public address, and a player is a peer rather than
+infrastructure.
+
+```bash
+# gateway -- no player, no game, just a rendezvous point
+freenet network --is-gateway   --public-network-address 192.168.1.121 --public-network-port 31337   --network-port 31337 --ws-api-port 7508   --skip-load-from-network --disable-auto-update   --data-dir "$GW_DIR/data" --config-dir "$GW_DIR/config"
+
+# player 1
+freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31338 --ws-api-port 7509   --skip-load-from-network --disable-auto-update   --data-dir "$ALICE_DIR/data" --config-dir "$ALICE_DIR/config"
+
+# player 2
+freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31339 --ws-api-port 7510   --skip-load-from-network --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
+```
+
+**Two physical hosts: verified 2026-08-28.** The one-machine scope limit that
+used to sit here is closed. A Ruy Lopez to ply 15 was played between a
+Windows/WSL2 node and an Arch node on separate machines, through a player-less
+gateway on the Arch box, and ended by resignation with both nodes independently
+reporting the same outcome, ply, FEN and contract id.
+
+Two practical findings from that run:
+
+- **A peer behind NAT is fine.** The WSL2 node cannot accept inbound
+  connections, but a peer only dials out. The single blocker was the gateway
+  host's firewall -- `sudo ufw allow 31337/udp` was sufficient. If a peer
+  reports `peer has not joined the network yet`, check the GATEWAY host's
+  firewall before suspecting NAT.
+- **Propagation is ~100ms between hosts**, measured by tight-polling against
+  epoch-bracketed signing instants. Do not expect seconds.
+
+On this topology both nodes independently reported the same final position and
+the same outcome:
+
+```
+ply 7, Black to move
+fen: r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4
+game over: White wins -- checkmate
+```
+
+`adjourn game list` on each also showed the **same contract id** and
+`last signed ply` 7 for White against 6 for Black -- the correct split for a
+7-ply game. The matching contract id is worth pausing on: it is the direct
+observation that both players derived byte-identical `GameParams`, the
+property whose failure mode is two players sitting on separate contracts with
+no error anywhere.
+
+### What is and is not established about a node falling behind
+
+An earlier version of this section told you to use `watch` rather than `show`
+because `show` "serves stale local state". **That was wrong as a general
+claim and has been removed.** On the three-node topology, a node that had
+never subscribed picked up its opponent's move through plain `adjourn show`
+within 10 seconds and held it.
+
+What actually happened in the two-node run that produced that advice: Bob sat
+at ply 2 through 90s of `show` polling while Alice was at ply 3, and a
+subsequent `watch` printed ply 3. Two readings fit, and the data does not
+separate them -- the subscribing GET fetched the record on demand, or it
+simply arrived on its own in between. The two-node topology was also
+independently reported as failing to complete a game across two attempts, so
+the likeliest explanation is that the topology was unreliable rather than that
+`show` and `watch` differ in this way.
+
+**Resolved: a node that misses an update recovers, without subscribing.**
+Two tests on the three-node topology, fresh game:
+
+- A node that had never subscribed picked up its opponent's move via plain
+  `adjourn show` within 10 seconds.
+- A node killed while its opponent moved, then restarted, reported the new ply
+  via `show` within 10 seconds of coming back -- again without subscribing.
+
+So a stuck board is NOT the expected behaviour here, and if you see one,
+investigate rather than assuming it will resolve. Both contrary reports -- a
+stale `show`, and a `watch` that printed one state and never advanced -- came
+from the two-node player-as-gateway shape, which also failed to complete a
+game twice. Use the three-node shape and the question does not arise.
 
 ### The two facts that cost real time to learn
 
@@ -229,7 +424,10 @@ adjourn show --label bob   --node ws://127.0.0.1:7510/v1/contract/command?encodi
 
 should report the ply Alice just played, and vice versa — that is the proof
 state actually crossed the network through the contract rather than one side
-talking to itself.
+talking to itself. **As written, with two `freenet local` nodes and no
+gateway configuration, it will not**: see the note in section 2. Each
+`adjourn show` here reports only the state already on that node's own
+storage.
 
 ### 4.6 Confirm the result
 

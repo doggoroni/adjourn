@@ -6,8 +6,11 @@
 //! colours, orientation and legal-target marking are all testable with no
 //! browser and no framework.
 
+pub mod app;
 pub mod board;
+pub mod conn;
 pub mod node;
+pub mod views;
 
 /// The compiled contract, embedded because a browser cannot read it off disk.
 ///

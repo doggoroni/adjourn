@@ -2,11 +2,12 @@
 //! pulls `mio`, which has no wasm32 backend — that is the whole reason
 //! `adjourn-client` exists as a separate crate.
 
-use adjourn_client::node::NodeClient;
+use adjourn_client::node::{is_missing_contract, NodeClient};
 use adjourn_core::delegate_api::{Request, Response};
 use anyhow::{anyhow, bail, Context};
 use freenet_stdlib::client_api::{
-    ClientRequest, ContractRequest, ContractResponse, DelegateRequest, HostResponse, WebApi,
+    ClientError, ClientRequest, ContractRequest, ContractResponse, DelegateRequest, HostResponse,
+    WebApi,
 };
 use freenet_stdlib::prelude::*;
 use std::collections::VecDeque;
@@ -102,20 +103,39 @@ impl NodeClient for WsClient {
             }))
             .await?;
         loop {
-            match self.recv_timeout("Get").await? {
-                HostResponse::ContractResponse(ContractResponse::GetResponse { state, .. }) => {
-                    return Ok(Some(state.as_ref().to_vec()))
-                }
-                HostResponse::ContractResponse(ContractResponse::NotFound { .. }) => {
+            match self.recv_timeout("Get").await {
+                Ok(HostResponse::ContractResponse(ContractResponse::GetResponse {
+                    state, ..
+                })) => return Ok(Some(state.as_ref().to_vec())),
+                Ok(HostResponse::ContractResponse(ContractResponse::NotFound { .. })) => {
                     return Ok(None)
                 }
                 // A subscribe ack or a stray notification can arrive first.
-                HostResponse::ContractResponse(ContractResponse::SubscribeResponse { .. }) => {}
-                HostResponse::ContractResponse(ContractResponse::UpdateNotification {
+                Ok(HostResponse::ContractResponse(ContractResponse::SubscribeResponse {
+                    ..
+                })) => {}
+                Ok(HostResponse::ContractResponse(ContractResponse::UpdateNotification {
                     key,
                     update,
-                }) => self.pending.push_back((*key.id(), update)),
-                other => bail!("unexpected response to Get: {other:?}"),
+                })) => self.pending.push_back((*key.id(), update)),
+                Ok(other) => bail!("unexpected response to Get: {other:?}"),
+                // A live node answers a GET for a contract it has never seen
+                // with `Err(ContractError::MissingContract)`, not
+                // `Ok(None)` -- confirmed against a real `freenet 0.2.130`
+                // node during `adjourn game bind`'s inviter path. Per
+                // `NodeClient::get`'s contract, that one case folds into
+                // `Ok(None)`; classified on the typed `ErrorKind` the error
+                // carries, never on its rendered message, so a wording
+                // change upstream cannot silently stop this matching and so
+                // a genuine transport failure cannot be misread as "not
+                // present" and silently PUT over a live game's contract.
+                Err(e)
+                    if e.downcast_ref::<ClientError>()
+                        .is_some_and(is_missing_contract) =>
+                {
+                    return Ok(None)
+                }
+                Err(e) => return Err(e),
             }
         }
     }

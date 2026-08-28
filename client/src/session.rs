@@ -257,6 +257,22 @@ async fn fetch_state<N: NodeClient>(node: &mut N, contract: [u8; 32]) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("contract state did not decode as a GameState"))
 }
 
+/// Everything a screen needs about one bound game.
+///
+/// `state` is here as well as `status` because `Status.chain` carries record
+/// IDs, not moves: rendering a move history means looking those IDs up in the
+/// record set. Nothing else needs the raw state.
+#[derive(Clone, Debug)]
+pub struct GameView {
+    pub label: String,
+    pub side: Side,
+    pub params: GameParams,
+    pub game_id: [u8; 32],
+    pub contract: [u8; 32],
+    pub state: GameState,
+    pub status: Status,
+}
+
 /// Everything a command needs to act on a bound game: the delegate's record
 /// of it, the contract to address, and the position as currently projected.
 ///
@@ -267,13 +283,8 @@ async fn fetch_state<N: NodeClient>(node: &mut N, contract: [u8; 32]) -> anyhow:
 /// command (`sign_move_at_ply` skips them all on purpose) and stay in each
 /// caller.
 struct OpenGame {
-    params: GameParams,
-    game_id: [u8; 32],
+    view: GameView,
     container: ContractContainer,
-    contract: [u8; 32],
-    side: Side,
-    state: GameState,
-    status: Status,
 }
 
 /// Turn a `label` into everything a move-flow command needs: resolve the
@@ -299,14 +310,59 @@ async fn open_game<N: NodeClient>(
     let status = project(&state, &params);
 
     Ok(OpenGame {
-        params,
-        game_id,
+        view: GameView {
+            label: label.to_string(),
+            side,
+            params,
+            game_id,
+            contract,
+            state,
+            status,
+        },
         container,
-        contract,
-        side,
-        state,
-        status,
     })
+}
+
+/// The public half of `open_game`, for screens that only need to render.
+pub async fn open_game_view<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<GameView> {
+    Ok(open_game(node, label, contract_wasm).await?.view)
+}
+
+/// The accepted moves, in play order, as UCI.
+///
+/// Driven by `status.chain` and NOT by iterating `state.records`: the record
+/// set is a `BTreeMap` keyed by ID, so iterating it yields hash order, which
+/// has nothing to do with the order the moves were played.
+///
+/// The inner `?` in the `filter_map` below silently skips a chain id that is
+/// missing from `view.state.records`, rather than reporting it. That is only
+/// safe because `view.status` and `view.state` are always produced by one
+/// `project(&state, ...)` call over the same `state` -- every id `status.chain`
+/// names is, by construction, a record in that same `state`. It stops being
+/// safe the moment a caller holds a `status` from one merge and a `state`
+/// from an earlier one: exactly the bug `watch_label`'s callback used to
+/// invite, when the UI updated `status` on every notification but left
+/// `state` frozen at whatever the initial open returned. The fix there was to
+/// keep the pair moving together (see `watch_label`'s callback signature),
+/// not to make this function tolerate the two drifting apart -- a `GameView`
+/// with a `status`/`state` mismatch is a bug at the call site, and this
+/// function has no way to tell "the game legitimately doesn't have that
+/// record yet" from "someone handed me two different snapshots", so silently
+/// dropping the id is the least-wrong of the two options it can't
+/// distinguish. If this ever fires in practice, look at the caller, not here.
+pub fn moves_in_order(view: &GameView) -> Vec<String> {
+    view.status
+        .chain
+        .iter()
+        .filter_map(|id| match &view.state.records.get(id)?.body {
+            Body::Move { uci, .. } => Some(uci.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Ask the delegate to sign `body`, submit it as a one-record delta, and
@@ -355,7 +411,7 @@ pub async fn show_label<N: NodeClient>(
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
-    Ok(g.status)
+    Ok(g.view.status)
 }
 
 /// Decode an update notification's `State` half. `Ok(None)` means the payload
@@ -412,15 +468,15 @@ pub async fn watch_label<N: NodeClient>(
     node: &mut N,
     label: &str,
     contract_wasm: Vec<u8>,
-    mut on_status: impl FnMut(&Status),
+    mut on_status: impl FnMut(&GameState, &Status),
 ) -> anyhow::Result<()> {
     let g = open_game(node, label, contract_wasm).await?;
-    let mut state = g.state;
-    on_status(&g.status);
+    let mut state = g.view.state;
+    on_status(&state, &g.view.status);
     // A decided game will never produce another notification, so entering the
     // loop would block forever on a game that has already ended -- printing
     // the final position and then hanging.
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         return Ok(());
     }
 
@@ -435,7 +491,9 @@ pub async fn watch_label<N: NodeClient>(
     // indistinguishable from an idle game. This GET's answer is the freshest
     // view available and closes that window on any transport, whatever the
     // transport's own subscribe-ordering guarantees are.
-    let subscribed = node.get(ContractInstanceId::new(g.contract), true).await?;
+    let subscribed = node
+        .get(ContractInstanceId::new(g.view.contract), true)
+        .await?;
     // Same empty-is-not-malformed rule as the notification arms below, and
     // through the same helper so the two can never drift apart.
     let fresh = match subscribed.as_deref() {
@@ -444,12 +502,12 @@ pub async fn watch_label<N: NodeClient>(
     };
     if let Some(fresh) = fresh {
         let before = state.records.len();
-        state.merge(&fresh, &g.params);
+        state.merge(&fresh, &g.view.params);
         // Report only if that actually moved us on, so the common case (the
         // two GETs agree) does not render the same position twice.
         if state.records.len() != before {
-            let status = project(&state, &g.params);
-            on_status(&status);
+            let status = project(&state, &g.view.params);
+            on_status(&state, &status);
             if status.is_over() {
                 return Ok(());
             }
@@ -468,7 +526,7 @@ pub async fn watch_label<N: NodeClient>(
         };
         // `OpenGame.contract` is a raw `[u8; 32]`; `ContractInstanceId` derefs
         // to the same, so compare through the deref rather than by type.
-        if *id != g.contract {
+        if *id != g.view.contract {
             continue; // a different game on the same connection
         }
         // A `State` payload is an encoded `GameState`; a `Delta` payload is an
@@ -485,27 +543,27 @@ pub async fn watch_label<N: NodeClient>(
         match update {
             UpdateData::State(bytes) => {
                 if let Some(incoming) = decode_state_payload(bytes.as_ref())? {
-                    state.merge(&incoming, &g.params);
+                    state.merge(&incoming, &g.view.params);
                 }
             }
             UpdateData::Delta(bytes) => {
                 if let Some(delta) = decode_delta_payload(bytes.as_ref())? {
-                    state.apply_delta(&delta, &g.params);
+                    state.apply_delta(&delta, &g.view.params);
                 }
             }
             UpdateData::StateAndDelta { state: s, delta } => {
                 if let Some(incoming) = decode_state_payload(s.as_ref())? {
-                    state.merge(&incoming, &g.params);
+                    state.merge(&incoming, &g.view.params);
                 }
                 if let Some(delta) = decode_delta_payload(delta.as_ref())? {
-                    state.apply_delta(&delta, &g.params);
+                    state.apply_delta(&delta, &g.view.params);
                 }
             }
             // `UpdateData` is `#[non_exhaustive]`. Ignore what we do not know.
             _ => continue,
         }
-        let status = project(&state, &g.params);
-        on_status(&status);
+        let status = project(&state, &g.view.params);
+        on_status(&state, &status);
         if status.is_over() {
             return Ok(());
         }
@@ -530,29 +588,41 @@ pub async fn play_move<N: NodeClient>(
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
 
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         bail!("the game is already over");
     }
-    if Side::from(g.status.turn) != g.side {
+    if Side::from(g.view.status.turn) != g.view.side {
         bail!("it is not your turn");
     }
-    if !legal_moves(&g.state, &g.params).iter().any(|m| m == uci) {
+    if !legal_moves(&g.view.state, &g.view.params)
+        .iter()
+        .any(|m| m == uci)
+    {
         bail!("{uci} is not a legal move in the current position");
     }
 
     let parent = g
+        .view
         .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| g.params.genesis());
+        .unwrap_or_else(|| g.view.params.genesis());
     let body = Body::Move {
-        ply: g.status.ply + 1,
+        ply: g.view.status.ply + 1,
         parent,
         uci: uci.to_string(),
     };
 
-    sign_and_submit(node, g.game_id, g.container, &g.params, g.contract, body).await
+    sign_and_submit(
+        node,
+        g.view.game_id,
+        g.container,
+        &g.view.params,
+        g.view.contract,
+        body,
+    )
+    .await
 }
 
 /// Resign `label`. Unconditional and position-independent (see
@@ -564,16 +634,16 @@ pub async fn resign<N: NodeClient>(
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         bail!("the game is already over");
     }
 
     sign_and_submit(
         node,
-        g.game_id,
+        g.view.game_id,
         g.container,
-        &g.params,
-        g.contract,
+        &g.view.params,
+        g.view.contract,
         Body::Resign,
     )
     .await
@@ -587,24 +657,25 @@ pub async fn draw_offer<N: NodeClient>(
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         bail!("the game is already over");
     }
     let at = g
+        .view
         .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| g.params.genesis());
+        .unwrap_or_else(|| g.view.params.genesis());
 
     sign_and_submit(
         node,
-        g.game_id,
+        g.view.game_id,
         g.container,
-        &g.params,
-        g.contract,
+        &g.view.params,
+        g.view.contract,
         Body::DrawOffer {
-            ply: g.status.ply,
+            ply: g.view.status.ply,
             at,
         },
     )
@@ -620,36 +691,38 @@ pub async fn draw_accept<N: NodeClient>(
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         bail!("the game is already over");
     }
     let head = g
+        .view
         .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| g.params.genesis());
-    let our_color: Color = g.side.into();
+        .unwrap_or_else(|| g.view.params.genesis());
+    let our_color: Color = g.view.side.into();
 
     let offer = g
+        .view
         .state
         .records
         .iter()
         .find(|(_, rec)| {
             matches!(&rec.body, Body::DrawOffer { at, .. } if *at == head)
-                && rec.color(&g.params) == Some(!our_color)
+                && rec.color(&g.view.params) == Some(!our_color)
         })
         .map(|(id, _)| *id)
         .ok_or_else(|| anyhow::anyhow!("no live draw offer from your opponent to accept"))?;
 
     sign_and_submit(
         node,
-        g.game_id,
+        g.view.game_id,
         g.container,
-        &g.params,
-        g.contract,
+        &g.view.params,
+        g.view.contract,
         Body::DrawAccept {
-            ply: g.status.ply,
+            ply: g.view.status.ply,
             offer,
         },
     )
@@ -667,35 +740,36 @@ pub async fn draw_claim<N: NodeClient>(
     contract_wasm: Vec<u8>,
 ) -> anyhow::Result<Status> {
     let g = open_game(node, label, contract_wasm).await?;
-    if g.status.is_over() {
+    if g.view.status.is_over() {
         bail!("the game is already over");
     }
-    let our_color: Color = g.side.into();
-    if g.status.turn != our_color {
+    let our_color: Color = g.view.side.into();
+    if g.view.status.turn != our_color {
         bail!("only the player to move may claim a draw");
     }
-    if g.status.repetitions < 3 && g.status.halfmove_clock < 100 {
+    if g.view.status.repetitions < 3 && g.view.status.halfmove_clock < 100 {
         bail!(
             "no draw to claim: {} repetitions, {} halfmoves since a capture or pawn move",
-            g.status.repetitions,
-            g.status.halfmove_clock
+            g.view.status.repetitions,
+            g.view.status.halfmove_clock
         );
     }
     let at = g
+        .view
         .status
         .chain
         .last()
         .copied()
-        .unwrap_or_else(|| g.params.genesis());
+        .unwrap_or_else(|| g.view.params.genesis());
 
     sign_and_submit(
         node,
-        g.game_id,
+        g.view.game_id,
         g.container,
-        &g.params,
-        g.contract,
+        &g.view.params,
+        g.view.contract,
         Body::DrawClaim {
-            ply: g.status.ply,
+            ply: g.view.status.ply,
             at,
         },
     )
@@ -725,21 +799,28 @@ pub async fn sign_move_at_ply<N: NodeClient>(
     // necessarily the current head: a double-sign attempt at an
     // already-signed ply must reuse that ply's original parent, not the
     // chain's head after it advanced past it.
-    let parent = if ply <= 1 {
-        g.params.genesis()
-    } else {
-        *g.status
-            .chain
-            .get(ply as usize - 2)
-            .ok_or_else(|| anyhow::anyhow!("no record at ply {} to parent ply {ply} on", ply - 1))?
-    };
+    let parent =
+        if ply <= 1 {
+            g.view.params.genesis()
+        } else {
+            *g.view.status.chain.get(ply as usize - 2).ok_or_else(|| {
+                anyhow::anyhow!("no record at ply {} to parent ply {ply} on", ply - 1)
+            })?
+        };
     let body = Body::Move {
         ply,
         parent,
         uci: uci.to_string(),
     };
 
-    sign_and_submit(node, g.game_id, g.container, &g.params, g.contract, body)
-        .await
-        .with_context(|| format!("sign move at ply {ply}"))
+    sign_and_submit(
+        node,
+        g.view.game_id,
+        g.container,
+        &g.view.params,
+        g.view.contract,
+        body,
+    )
+    .await
+    .with_context(|| format!("sign move at ply {ply}"))
 }
