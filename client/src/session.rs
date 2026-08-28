@@ -19,7 +19,7 @@
 use adjourn_core::delegate_api::{GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::state::Delta;
 use adjourn_core::{legal_moves, project, Body, GameParams, GameState, Status};
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId, UpdateData};
 use shakmaty::Color;
 
@@ -217,12 +217,104 @@ async fn bound_game<N: NodeClient>(node: &mut N, label: &str) -> anyhow::Result<
     Ok(summary)
 }
 
+/// What a migration did, so a caller can report it precisely rather than
+/// saying "ok".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrateOutcome {
+    /// This build already derives the recorded id. Nothing to do.
+    AlreadyCurrent { contract: [u8; 32] },
+    Migrated {
+        from: [u8; 32],
+        to: [u8; 32],
+        records: usize,
+    },
+}
+
+/// Move an in-progress game onto the contract id THIS build derives.
+///
+/// Ordered so a failure never leaves a worse state than it found: the PUT
+/// happens before the delegate is told anything, so a failed PUT leaves the
+/// game exactly where it was, still bound to the old id. If the PUT succeeds
+/// and the Rebind does not, the new address holds the state and the delegate
+/// still points at the old one -- re-running this completes it, because a PUT
+/// of the same records merges by union and a Rebind to the already-current id
+/// is a no-op.
+///
+/// Deliberately goes through [`bound_game`], not [`open_game`]: `open_game`
+/// (via `expected_container`) refuses precisely when the recorded contract id
+/// does not match what this build derives -- which is exactly the situation
+/// that makes a game a migration candidate in the first place. Routing
+/// through the checking path here would refuse the very games this function
+/// exists to rescue.
+pub async fn migrate_label<N: NodeClient>(
+    node: &mut N,
+    label: &str,
+    contract_wasm: Vec<u8>,
+) -> anyhow::Result<MigrateOutcome> {
+    let summary = bound_game(node, label).await?;
+    let params = summary
+        .params
+        .clone()
+        .expect("bound_game checked this is Some");
+    let old = summary.contract.expect("bound_game checked this is Some");
+
+    let (container, new_id) = contract_container(contract_wasm, &params)?;
+    if *new_id == old {
+        return Ok(MigrateOutcome::AlreadyCurrent { contract: old });
+    }
+
+    // Read the game from where it lives now. Scoped deliberately: if the old
+    // contract has gone cold there is no local copy to fall back on, and
+    // saying so is better than PUTting an empty state over the new address.
+    let raw = node
+        .get(ContractInstanceId::new(old), false)
+        .await
+        .context("GET the old contract")?
+        .ok_or_else(|| {
+            anyhow!(
+                "the previous contract {} is no longer on the network, so this \
+                 game cannot be migrated",
+                ContractInstanceId::new(old).encode()
+            )
+        })?;
+    let state = if raw.is_empty() {
+        GameState::empty()
+    } else {
+        GameState::decode(&raw)
+            .ok_or_else(|| anyhow!("the previous contract's state did not decode"))?
+    };
+    let records = state.records.len();
+
+    node.put(container, state.encode())
+        .await
+        .context("PUT the game under the new contract id")?;
+
+    match node
+        .delegate(Request::Rebind {
+            label: label.to_string(),
+            contract: *new_id,
+        })
+        .await
+        .context("Rebind")?
+    {
+        Response::Bound { .. } => {}
+        Response::Refused(r) => return Err(refused(r)),
+        other => bail!("unexpected response to Rebind: {other:?}"),
+    }
+    Ok(MigrateOutcome::Migrated {
+        from: old,
+        to: *new_id,
+        records,
+    })
+}
+
 /// Derive the contract's key and container from `params`, and confirm the id
 /// matches what the delegate recorded at bind time. A mismatch means this
 /// build's `contract_wasm` differs from the one used when the game was
 /// bound, which would otherwise silently GET, PUT and UPDATE the wrong
 /// contract.
 fn expected_container(
+    label: &str,
     contract_wasm: Vec<u8>,
     params: &GameParams,
     bound_contract: [u8; 32],
@@ -233,7 +325,9 @@ fn expected_container(
         bail!(
             "build mismatch: this build derives contract {} from the bound params, \
              but the delegate recorded {}. Rebuild with the same adjourn-contract \
-             version used when this game was bound.",
+             version used when this game was bound, or run \
+             `adjourn game migrate --label {label}` to move this game onto \
+             the contract this build derives.",
             ContractInstanceId::new(*id).encode(),
             ContractInstanceId::new(bound_contract).encode(),
         );
@@ -304,7 +398,7 @@ async fn open_game<N: NodeClient>(
     let contract = game.contract.expect("bound_game checked this is Some");
     let game_id = game.game_id.expect("bound_game checked this is Some");
     let side = game.side.expect("bound_game checked this is Some");
-    let container = expected_container(contract_wasm, &params, contract)?;
+    let container = expected_container(label, contract_wasm, &params, contract)?;
 
     let state = fetch_state(node, contract).await?;
     let status = project(&state, &params);
