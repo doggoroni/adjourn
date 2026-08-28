@@ -6,6 +6,43 @@ use adjourn_client::session::{
 };
 use adjourn_core::delegate_api::Side;
 
+/// Pins the PUT-before-Rebind ordering. `FakeNode`'s `put` and `delegate`
+/// both otherwise succeed unconditionally, so nothing else in this file (or
+/// `migrate_label` itself) can tell a correctly-ordered implementation apart
+/// from one that Rebinds before it PUTs -- both would pass the two tests
+/// above identically. Arming `fail_next_put` makes the PUT fail, and the
+/// assertion that follows is exactly what "a failed PUT leaves the game
+/// exactly where it was" means: still bound to the OLD contract id, and still
+/// readable there.
+#[tokio::test]
+async fn a_failed_put_leaves_the_game_bound_to_the_old_contract() {
+    let Some((mut alice, mut bob, wasm)) = setup().await else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+    let mut variant = wasm.clone();
+    variant.extend_from_slice(b"\0\0variant");
+
+    play_move(&mut alice, "alice", "e2e4", wasm.clone())
+        .await
+        .unwrap();
+    let before = open_game_view(&mut bob, "bob", wasm.clone()).await.unwrap();
+
+    bob.fail_next_put();
+    let err = migrate_label(&mut bob, "bob", variant)
+        .await
+        .expect_err("a failed PUT must fail the migration");
+    assert!(
+        format!("{err:#}").to_lowercase().contains("put"),
+        "got: {err:#}"
+    );
+
+    // Still bound to the OLD contract, and still readable there -- the
+    // delegate was never told about a new id, because Rebind runs after PUT.
+    let after = open_game_view(&mut bob, "bob", wasm).await.unwrap();
+    assert_eq!(after.contract, before.contract);
+    assert_eq!(after.status.ply, before.status.ply);
+}
+
 /// Same shape as `client/tests/moves.rs::setup`: invite, accept, bind, and
 /// hand back both players plus the contract WASM bytes so a test can play
 /// moves and derive ids.

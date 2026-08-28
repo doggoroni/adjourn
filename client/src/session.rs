@@ -285,7 +285,20 @@ pub async fn migrate_label<N: NodeClient>(
     };
     let records = state.records.len();
 
-    node.put(container, state.encode())
+    // Empty state PUTs as zero bytes, matching every other PUT site in this
+    // file (`invite_accept`, `game_bind`) rather than `state.encode()`'s
+    // 1-byte CBOR `0x80` for an empty record set. The two decode identically
+    // through `fetch_state`/`decode_state_payload`, but `CLAUDE.md` records a
+    // real incident (`self_delta_empty`) where emitting the encoded-empty
+    // byte instead of zero bytes defeated a broadcast-skip optimisation on
+    // the delta path; matching the file's own convention here costs nothing
+    // and keeps every PUT site uniform.
+    let put_bytes = if records == 0 {
+        Vec::new()
+    } else {
+        state.encode()
+    };
+    node.put(container, put_bytes)
         .await
         .context("PUT the game under the new contract id")?;
 
