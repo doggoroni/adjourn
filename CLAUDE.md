@@ -1253,10 +1253,62 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   is required for isolation: without it a gateway loads the public gateway
   index and joins the real Freenet network (observed: 6 live peers, telemetry
   to `nova.locut.us:4318`). A gateway is not isolated by default.
-- **Everything above ran on ONE machine.** Three nodes, one ThinkPad. That
-  exercises the protocol, the contract, the delegate, the key derivation and
-  bidirectional propagation. It does NOT show any of it survives a real
-  network between hosts -- NAT, firewalls, wifi latency. Still open.
+- **A full game across TWO PHYSICAL HOSTS, 2026-08-28.** This closes the
+  one-machine scope limit that stood until now. Windows/WSL2 (192.168.1.122)
+  played Black against Arch/Omarchy (192.168.1.121) playing White, through a
+  player-less gateway on the Arch box. A Ruy Lopez to ply 15, ended by Black
+  resigning. Both nodes independently reported
+  `game over: White wins -- resignation` at the same ply and FEN, on the same
+  contract id.
+
+  What that establishes beyond the one-machine runs:
+
+  - **Both hosts derived the same contract id**
+    (`2J8AqvARuBasyqtrcPJaUehA2bPW35PC9U5xUtrZwV12`), directly observed on each
+    machine. This is the property `adjourn-client` exists to guarantee, whose
+    failure mode is two players silently sitting on separate contracts.
+  - **Resignation decides a game across hosts.** A different outcome branch
+    from the one-machine scholar's mate, and a stricter one: `Resign` is
+    unanchored, naming no position, so there is no ply at which it stops
+    applying (invariant 7).
+  - **`watch` short-circuits on a decided game -- returned in 0.00s.** The
+    "Client" section below has always required this; it had only ever been
+    exercised against `FakeNode`. Now confirmed against a real node.
+  - **Castling round-tripped** (`e1g1`), signed, propagated and projected with
+    castling rights correctly invalidated. Relevant because invariant 8's
+    two-spellings hazard is structural: `walk` counts records per
+    `(signer, ply)` and cannot tell two spellings of one castle apart.
+  - **A peer behind NAT works.** The WSL2 node sits behind NAT and cannot
+    accept inbound connections, but a peer only ever dials out. The only
+    blocker was the gateway host's firewall; opening UDP 31337 to the LAN was
+    sufficient. NAT was never the obstacle.
+
+- **Two-host propagation is ~100ms, and the one slow sample is NOT cold start.**
+  Measured by tight-polling `adjourn show` with no sleep (one cycle = 115ms,
+  measured flat over five runs), against epoch-bracketed signing instants on
+  the far host:
+
+  | sample | contract | signed -> seen |
+  |---|---|---|
+  | first propagation, fresh contract | `77rqZnHL...RoFyS` | ~110ms |
+  | first propagation, fresh contract | `ARF4Dsy7...m7KC` | ~120ms |
+  | mid-game, warm | `2J8Aqv...wV12` | 23-118ms windows |
+
+  One early sample in the first cross-host game measured **6.47s**, and it is
+  unexplained. The tempting hypothesis -- that first contact on a freshly
+  bound contract is inherently expensive and steady state is cheap -- was
+  tested directly and **falsified**: two fresh contracts both propagated their
+  very first move in ~100ms. Record 6.47s as an unexplained outlier, not as a
+  cold-start cost, and do not build a mental model on it.
+
+- **Methodological note that cost real time here: a reconstructed timestamp is
+  not a measurement.** Three timestamps in that run were estimated rather than
+  read from the process that observed the event, and all three produced
+  impossible results -- including one signing instant reported 132 seconds
+  AFTER the far node had already seen the move. At these speeds any timestamp
+  not taken by the observing process is unusable, and worse than no data
+  because it looks like data. Bracket every measurement with epoch before/after
+  and paste the real values.
 - **The WASM is byte-identical across two different Linux distributions.**
   Ubuntu 24.04 under WSL2 and Arch (Omarchy, kernel 7.1.8) both produced
   contract `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`

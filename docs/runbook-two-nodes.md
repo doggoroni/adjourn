@@ -231,11 +231,21 @@ freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network
 freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31339 --ws-api-port 7510   --skip-load-from-network --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
 ```
 
-**Scope limit worth keeping in mind:** all three nodes ran on ONE machine.
-That exercises the protocol, the contract, the delegate, the key derivation
-and bidirectional propagation. It does NOT show that any of it survives a real
-network between two hosts -- NAT, firewalls, wifi latency. That remains
-untested, and is what a second machine is actually for.
+**Two physical hosts: verified 2026-08-28.** The one-machine scope limit that
+used to sit here is closed. A Ruy Lopez to ply 15 was played between a
+Windows/WSL2 node and an Arch node on separate machines, through a player-less
+gateway on the Arch box, and ended by resignation with both nodes independently
+reporting the same outcome, ply, FEN and contract id.
+
+Two practical findings from that run:
+
+- **A peer behind NAT is fine.** The WSL2 node cannot accept inbound
+  connections, but a peer only dials out. The single blocker was the gateway
+  host's firewall -- `sudo ufw allow 31337/udp` was sufficient. If a peer
+  reports `peer has not joined the network yet`, check the GATEWAY host's
+  firewall before suspecting NAT.
+- **Propagation is ~100ms between hosts**, measured by tight-polling against
+  epoch-bracketed signing instants. Do not expect seconds.
 
 On this topology both nodes independently reported the same final position and
 the same outcome:
