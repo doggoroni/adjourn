@@ -147,15 +147,70 @@ freenet network --is-gateway   --public-network-address 192.168.1.121   --public
 freenet network   --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31338   --ws-api-port 7510   --skip-load-from-network   --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
 ```
 
-`--gateway` takes `"ip:port,hex-pubkey"`, where the key is the gateway's
-64-character hex X25519 public key. Start the gateway first and take the key
-from its startup output or its `--config-dir`; no `freenet` subcommand prints
-it on request.
+### Getting the gateway's public key: you must DERIVE it
 
-`--skip-load-from-network` keeps the pair from reaching for the public gateway
-index -- a gateway always runs isolated under it anyway, and supplying an
-explicit `--gateway` entry makes the CLI entries REPLACE the on-disk
-`gateways.toml` cache rather than merge with it.
+`--gateway` takes `"ip:port,hex-pubkey"`. **The gateway never prints or stores
+its own public key.** There is no startup banner, no subcommand, and nothing
+under its `--data-dir` or `--config-dir` contains it. Two operators searched
+independently and found nothing; do not go looking.
+
+What the gateway stores is the PRIVATE key:
+
+```
+<data-dir>/secrets/transport_keypair
+```
+
+Despite the name, that file holds a single 32-byte X25519 private scalar as 64
+ASCII hex characters, no trailing newline. The public key is that scalar
+multiplied by the X25519 base point. Derive it:
+
+```bash
+SK=$(cat "$GW_DIR/data/secrets/transport_keypair")
+python3 -c "
+open('/tmp/k.der','wb').write(bytes.fromhex('302e020100300506032b656e04220420'+'$SK'.strip()))"
+openssl pkey -inform DER -in /tmp/k.der -pubout -outform DER   | python3 -c "import sys; print(sys.stdin.buffer.read()[-32:].hex())"
+rm -f /tmp/k.der
+```
+
+`302e020100300506032b656e04220420` is the PKCS#8 DER wrapper for a raw X25519
+private key; `openssl` does the multiplication and `-pubout -outform DER`
+emits SPKI, whose last 32 bytes are the raw public key. Verified twice, by two
+operators independently: the derived value is byte-identical to the
+`--gateway` argument the live peers are connected with.
+
+**Document the derivation, never a key.** The keypair regenerates with every
+fresh `--data-dir` -- three runs on one machine produced three different
+gateway keys. Anyone copying a literal key out of documentation gets a
+handshake failure.
+
+**Ordering constraint:** `transport_keypair` does not exist until the gateway
+has started once, so you cannot construct the peers' `--gateway` argument
+until after the gateway's first boot. Start it, wait for the file (~12s), then
+derive and start the peers.
+
+**A naming trap in the same directory:** the sibling files
+`public.nova.gw.pem` and `public.vega.gw.pem` are NOT PEM despite the
+extension. They use the same bare 64-hex-character format as
+`transport_keypair`, which makes a public key and a private key visually
+indistinguishable on disk. Check which file you are reading before you paste
+it anywhere.
+
+### Two flags that are not optional
+
+Both were learned the hard way, and both fail in ways that look like something
+else:
+
+- **`--disable-auto-update` is MANDATORY.** GitHub now publishes 0.2.131, so a
+  pinned 0.2.130 node logs "Startup check: newer version on GitHub, triggering
+  auto-update" and **exits with code 42 about 58 seconds in**. Without this
+  flag your nodes silently drift to different versions mid-game, which is the
+  same class of failure as a WASM hash mismatch wearing a different hat -- and
+  this project's whole contract-key discipline exists to prevent exactly that.
+- **`--skip-load-from-network` is REQUIRED for isolation.** Without it a
+  gateway loads the public gateway index and **joins the real Freenet
+  network** -- observed with 6 live peers and telemetry going to
+  `nova.locut.us:4318`. A gateway is not isolated by default, and the `--help`
+  wording is easy to misread as implying it is.
 
 ### The three-node shape, which is what actually played a full game
 
@@ -175,6 +230,12 @@ freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network
 # player 2
 freenet network --gateway "192.168.1.121:31337,<GATEWAY_HEX_PUBKEY>"   --network-port 31339 --ws-api-port 7510   --skip-load-from-network --disable-auto-update   --data-dir "$BOB_DIR/data" --config-dir "$BOB_DIR/config"
 ```
+
+**Scope limit worth keeping in mind:** all three nodes ran on ONE machine.
+That exercises the protocol, the contract, the delegate, the key derivation
+and bidirectional propagation. It does NOT show that any of it survives a real
+network between two hosts -- NAT, firewalls, wifi latency. That remains
+untested, and is what a second machine is actually for.
 
 On this topology both nodes independently reported the same final position and
 the same outcome:

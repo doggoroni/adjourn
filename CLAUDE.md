@@ -1234,6 +1234,29 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   correct split for a 7-ply game, so the delegate's one-signature-per-(game,
   ply) accounting held across the whole game on both stores.
 
+- **A Freenet gateway never publishes its own public key; you derive it.**
+  `--gateway` wants `"ip:port,hex-pubkey"`, and there is no banner, no
+  subcommand and no file under the gateway's `--data-dir` or `--config-dir`
+  that contains the public half. `<data-dir>/secrets/transport_keypair` holds
+  only the 32-byte X25519 private scalar as 64 ASCII hex characters; the
+  public key is that scalar times the base point. `docs/runbook-two-nodes.md`
+  carries the exact derivation. Verified independently by two operators
+  against the value the live peers were connected with. The keypair
+  regenerates per `--data-dir` -- three runs produced three different keys --
+  so documentation must carry the DERIVATION and never a literal key.
+- **Two `freenet network` flags are load-bearing, and both fail as something
+  else.** `--disable-auto-update` is mandatory: with 0.2.131 published, a
+  pinned 0.2.130 node triggers auto-update and exits with code 42 about 58
+  seconds in, so nodes silently drift to different versions mid-game -- the
+  same class of failure as a rotated contract key, which is the thing this
+  file's entire build discipline exists to prevent. `--skip-load-from-network`
+  is required for isolation: without it a gateway loads the public gateway
+  index and joins the real Freenet network (observed: 6 live peers, telemetry
+  to `nova.locut.us:4318`). A gateway is not isolated by default.
+- **Everything above ran on ONE machine.** Three nodes, one ThinkPad. That
+  exercises the protocol, the contract, the delegate, the key derivation and
+  bidirectional propagation. It does NOT show any of it survives a real
+  network between hosts -- NAT, firewalls, wifi latency. Still open.
 - **The WASM is byte-identical across two different Linux distributions.**
   Ubuntu 24.04 under WSL2 and Arch (Omarchy, kernel 7.1.8) both produced
   contract `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`
