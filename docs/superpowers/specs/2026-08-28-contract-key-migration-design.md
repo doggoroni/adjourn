@@ -63,8 +63,23 @@ Migration is a direct `GET(old) → PUT(new)`, not a search.
 - **Scope is migration from a live old contract.** If the old contract has gone
   cold and been evicted, report that and stop. Local state persistence is
   separate work and is deliberately not part of this.
-- **`common/` must not change.** Any change there rotates the contract key,
-  which is the problem being solved, not a step in solving it.
+- **The contract's reachable graph must not change.** The original wording here
+  was "`common/` must not change", which is too strong and would have blocked
+  this work entirely, since `GameRecord` and `decide_bind` live in
+  `common/src/delegate_policy.rs`.
+
+  Verified empirically 2026-08-28: adding a `pub fn` to
+  `common/src/delegate_policy.rs` and rebuilding via `scripts/build-contract.sh`
+  produced a **byte-identical** contract (`875ac4d2…`, 267,003 bytes). The
+  contract imports only `adjourn_core::state::{Delta, Summary}` and
+  `adjourn_core::{GameParams, GameState}` and never references
+  `delegate_policy` or `delegate_api`, so delegate-only code is dead from its
+  perspective and is stripped.
+
+  **This work therefore does not rotate the contract key**, and needs no
+  River-style feature gate. Anything touching `GameParams`, `GameState`,
+  `Record`, `Delta` or `Summary` still would. Re-run the hash check if in
+  doubt; it takes one build.
 
 ## Validated assumptions
 
@@ -116,9 +131,16 @@ A new `Rebind` request carrying `{ label, contract: [u8; 32] }`. It updates
 derived id rather than a richer type. It **preserves `last_signed_ply`,
 `origin`, `params` and `game_id` unchanged**.
 
-`GAME_RECORD_FORMAT` goes **2 → 3** for the added `previous` field. The reader
-must migrate a format-2 record by treating `previous` as `None`. It must NOT
-widen the format check.
+`GAME_RECORD_FORMAT` goes **2 → 3** for the added `previous` field.
+
+**Format 2 must be MIGRATED, not refused.** The current readers refuse outright
+on `existing.format != GAME_RECORD_FORMAT`, so a naive bump would reject every
+game already bound — breaking exactly the games this feature exists to save.
+`CLAUDE.md` already prescribes the right behaviour: "teach the reader to
+migrate the old shape — never widen the check." So the rule becomes: format 3
+is accepted, format 2 is upgraded in place to format 3 with `previous = None`,
+and anything else is refused. The migration must still run **before** any other
+field is trusted, preserving `the_format_check_precedes_every_other_check`.
 
 This bump is load-bearing, not ceremony. `CLAUDE.md`'s "Persisted-record
 versioning" section describes the exact failure a careless version causes: a
