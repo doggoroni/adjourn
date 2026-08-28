@@ -690,6 +690,10 @@ fn rebind_updates_the_contract_and_records_the_previous_one() {
     let mut rec = sample_record();
     rec.contract = [1u8; 32];
     rec.last_signed_ply = 5;
+    // Distinctive and non-zero: sample_record()'s default is [0u8; 32], which a
+    // dropped field would silently preserve by accident. Only a distinct value
+    // proves the double-sign guard's body hash actually survives a rebind.
+    rec.last_move_body_hash = [7u8; 32];
 
     match decide_rebind(Some(&rec), "alice", [2u8; 32], None) {
         RebindDecision::Rebind { record } => {
@@ -698,6 +702,10 @@ fn rebind_updates_the_contract_and_records_the_previous_one() {
             assert_eq!(
                 record.last_signed_ply, 5,
                 "the ply counter must survive a rebind"
+            );
+            assert_eq!(
+                record.last_move_body_hash, [7u8; 32],
+                "the double-sign guard's body hash must survive a rebind"
             );
             assert_eq!(record.params, rec.params);
             assert_eq!(record.side, rec.side);
@@ -749,10 +757,18 @@ fn rebind_refuses_a_different_origin() {
 }
 
 /// A record whose layout is not ours cannot be trusted field by field.
+///
+/// The record ALSO carries an origin that differs from the caller's (`None`
+/// here, `Some([8u8; 32])` on the record), so this only passes if the format
+/// check runs BEFORE the origin check. With both `None`, a version that
+/// checked origin first would also return `StaleRecordFormat` by accident
+/// (there'd be nothing to disagree about) and this test would not catch the
+/// reordering. Do not "simplify" this back to a bare `None`/`None` pair.
 #[test]
 fn rebind_refuses_an_unmigratable_format() {
     let mut rec = sample_record();
     rec.format = 200;
+    rec.origin = Some([8u8; 32]);
     assert!(matches!(
         decide_rebind(Some(&rec), "alice", [2u8; 32], None),
         RebindDecision::Refuse(Refusal::StaleRecordFormat { .. })
