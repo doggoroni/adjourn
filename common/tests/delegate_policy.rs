@@ -1,7 +1,7 @@
 use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
-    classify_host_entropy, decide_bind, decide_sign, derive_seed, migrate_record, BindDecision,
-    GameRecord, HostEntropy, SignDecision, GAME_RECORD_FORMAT,
+    classify_host_entropy, decide_bind, decide_rebind, decide_sign, derive_seed, migrate_record,
+    BindDecision, GameRecord, HostEntropy, RebindDecision, SignDecision, GAME_RECORD_FORMAT,
 };
 use adjourn_core::{Body, GameParams, MAX_PLY};
 use ed25519_dalek::SigningKey;
@@ -621,6 +621,7 @@ fn a_game_summary_with_params_and_contract_round_trips_through_cbor() {
         entropy: Some(EntropyQuality::HostBacked),
         params: Some(params.clone()),
         contract: Some(CONTRACT),
+        previous: None,
     };
     let resp = Response::Games(vec![summary.clone()]);
 
@@ -682,6 +683,80 @@ fn sample_record() -> GameRecord {
         last_signed_ply: 0,
         last_move_body_hash: [0u8; 32],
     }
+}
+
+#[test]
+fn rebind_updates_the_contract_and_records_the_previous_one() {
+    let mut rec = sample_record();
+    rec.contract = [1u8; 32];
+    rec.last_signed_ply = 5;
+
+    match decide_rebind(Some(&rec), "alice", [2u8; 32], None) {
+        RebindDecision::Rebind { record } => {
+            assert_eq!(record.contract, [2u8; 32]);
+            assert_eq!(record.previous, Some([1u8; 32]));
+            assert_eq!(
+                record.last_signed_ply, 5,
+                "the ply counter must survive a rebind"
+            );
+            assert_eq!(record.params, rec.params);
+            assert_eq!(record.side, rec.side);
+            assert_eq!(record.origin, rec.origin);
+        }
+        other => panic!("expected Rebind, got {other:?}"),
+    }
+}
+
+/// Idempotent: rebinding to the id already recorded changes nothing, and in
+/// particular must NOT set `previous` to the current id and start watching
+/// an address that is the same as the live one.
+#[test]
+fn rebinding_to_the_same_contract_is_a_no_op() {
+    let mut rec = sample_record();
+    rec.contract = [1u8; 32];
+    rec.previous = None;
+
+    match decide_rebind(Some(&rec), "alice", [1u8; 32], None) {
+        RebindDecision::Rebind { record } => {
+            assert_eq!(record.contract, [1u8; 32]);
+            assert_eq!(
+                record.previous, None,
+                "a no-op rebind must not invent a previous id"
+            );
+        }
+        other => panic!("expected a no-op Rebind, got {other:?}"),
+    }
+}
+
+#[test]
+fn rebind_refuses_a_label_with_no_bound_game() {
+    assert!(matches!(
+        decide_rebind(None, "alice", [2u8; 32], None),
+        RebindDecision::Refuse(Refusal::NotBound)
+    ));
+}
+
+/// Same origin rule as every other call: a web-app game keeps full protection,
+/// and a `None` game refuses any caller that presents an origin.
+#[test]
+fn rebind_refuses_a_different_origin() {
+    let mut rec = sample_record();
+    rec.origin = Some([9u8; 32]);
+    assert!(matches!(
+        decide_rebind(Some(&rec), "alice", [2u8; 32], Some([8u8; 32])),
+        RebindDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+/// A record whose layout is not ours cannot be trusted field by field.
+#[test]
+fn rebind_refuses_an_unmigratable_format() {
+    let mut rec = sample_record();
+    rec.format = 200;
+    assert!(matches!(
+        decide_rebind(Some(&rec), "alice", [2u8; 32], None),
+        RebindDecision::Refuse(Refusal::StaleRecordFormat { .. })
+    ));
 }
 
 /// A format-2 record must be UPGRADED, not rejected. Refusing it would break

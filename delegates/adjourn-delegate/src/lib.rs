@@ -8,7 +8,8 @@ pub mod secrets;
 
 use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response};
 use adjourn_core::delegate_policy::{
-    classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, SignDecision,
+    classify_host_entropy, decide_bind, decide_rebind, decide_sign, derive_seed, BindDecision,
+    RebindDecision, SignDecision,
 };
 use adjourn_core::types::{GameParams, Record};
 use adjourn_core::{project, Body, GameState};
@@ -142,6 +143,32 @@ fn handle_bind_game<S: SecretStore>(
     }
 }
 
+/// Point `label`'s bound game at a new contract instance. See
+/// `Request::Rebind` and `decide_rebind` for why this is deliberately
+/// trust-the-client: the delegate cannot verify `contract` derives from the
+/// stored params, and rebinding touches neither the signing key nor the ply
+/// counter.
+fn handle_rebind_game<S: SecretStore>(
+    store: &mut S,
+    origin: Option<[u8; 32]>,
+    label: String,
+    contract: [u8; 32],
+) -> Response {
+    let existing =
+        secrets::load_bound_game_id(store, &label).and_then(|id| secrets::load_game(store, &id));
+
+    match decide_rebind(existing.as_ref(), &label, contract, origin) {
+        RebindDecision::Refuse(refusal) => Response::Refused(refusal),
+        RebindDecision::Rebind { record } => {
+            let game_id = record.game_id();
+            if !secrets::store_game(store, &record) {
+                return Response::Refused(Refusal::StoreFailed);
+            }
+            Response::Bound { game_id }
+        }
+    }
+}
+
 /// Best-effort only. Returns `None` when we cannot tell — no local replica, or
 /// it does not decode — and the signature is granted anyway. The monotonic ply
 /// counter in `decide_sign` is the actual guarantee; requiring state here would
@@ -236,6 +263,7 @@ fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Res
                 entropy: Some(record.entropy),
                 params: Some(record.params.clone()),
                 contract: Some(record.contract),
+                previous: record.previous,
             },
             None => GameSummary {
                 label,
@@ -246,6 +274,7 @@ fn handle_list_games<S: SecretStore>(store: &S, origin: Option<[u8; 32]>) -> Res
                 params: None,
                 contract: None,
                 entropy: quality,
+                previous: None,
             },
         });
     }
@@ -269,6 +298,7 @@ pub fn handle<S: SecretStore>(
             params,
             contract,
         } => handle_bind_game(store, origin, label, params, contract),
+        Request::Rebind { label, contract } => handle_rebind_game(store, origin, label, contract),
         Request::Sign { game_id, body } => handle_sign(store, origin, game_id, body),
         Request::ListGames => handle_list_games(store, origin),
     }

@@ -60,6 +60,21 @@ pub enum Request {
         #[serde(with = "serde_bytes")]
         contract: [u8; 32],
     },
+    /// Point an already-bound game at a new contract instance, after the
+    /// contract WASM was rebuilt and its key moved.
+    ///
+    /// The delegate CANNOT verify that `contract` really derives from the
+    /// stored params — that is `hash(code, params)` and the delegate has no
+    /// contract code and no way to hash it. This is deliberately
+    /// trust-the-client: the id check is a build-mismatch guard, not a
+    /// security boundary, and rebinding touches neither the signing key nor
+    /// the ply counter. The properties that matter — one signature per
+    /// `(game, ply)`, and the key never leaving the delegate — are unaffected.
+    Rebind {
+        label: String,
+        #[serde(with = "serde_bytes")]
+        contract: [u8; 32],
+    },
     Sign {
         #[serde(with = "serde_bytes")]
         game_id: GameId,
@@ -120,6 +135,11 @@ pub struct GameSummary {
     /// The game contract's instance id, once bound.
     #[serde(with = "serde_bytes")]
     pub contract: Option<[u8; 32]>,
+    /// The contract this game was bound to before a migration, if any. A
+    /// client watches it alongside the current one so an opponent still on the
+    /// old generation is visible rather than looking like a stalled game.
+    #[serde(with = "serde_bytes")]
+    pub previous: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +169,9 @@ pub enum Refusal {
     /// The caller is not who bound this game. With `Option` equality there is
     /// exactly one way to fail — you are not the binder — so one variant.
     WrongOrigin,
+    /// The label exists but has no game bound to it, so there is nothing to
+    /// point at a new contract.
+    NotBound,
     NoEntropy,
     /// The persisted record was written by a different delegate generation.
     /// Refused rather than interpreted: see `GAME_RECORD_FORMAT`.
@@ -192,6 +215,9 @@ impl std::fmt::Display for Refusal {
             ),
             Refusal::WrongOrigin => {
                 write!(f, "this game was bound by a different caller")
+            }
+            Refusal::NotBound => {
+                write!(f, "no game is bound to that label")
             }
             Refusal::NoEntropy => {
                 write!(f, "no entropy source is available to generate a key")

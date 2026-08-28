@@ -245,6 +245,63 @@ pub fn decide_bind(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RebindDecision {
+    Rebind { record: GameRecord },
+    Refuse(Refusal),
+}
+
+/// Point `label`'s bound game at a new contract instance.
+///
+/// Everything that carries a security property is preserved verbatim:
+/// `last_signed_ply` and `last_move_body_hash` (the double-sign guard),
+/// `params` and `side` (who may sign what), and `origin` (who may call at
+/// all). Only the address changes.
+///
+/// Deliberately trust-the-client: the delegate cannot verify that `contract`
+/// really derives from the stored params — that is `hash(code, params)` and
+/// the delegate has no contract code and no way to hash it. The id check is
+/// therefore a build-mismatch guard, not a security boundary; rebinding
+/// touches neither the signing key nor the ply counter.
+pub fn decide_rebind(
+    existing: Option<&GameRecord>,
+    label: &str,
+    contract: [u8; 32],
+    origin: Option<[u8; 32]>,
+) -> RebindDecision {
+    let Some(existing) = existing else {
+        return RebindDecision::Refuse(Refusal::NotBound);
+    };
+    // Before anything else: if the layout is not ours, no field inside it can
+    // be trusted — including the origin we are about to check.
+    if existing.format != GAME_RECORD_FORMAT {
+        return RebindDecision::Refuse(Refusal::StaleRecordFormat {
+            found: existing.format,
+            expected: GAME_RECORD_FORMAT,
+        });
+    }
+    if existing.origin != origin {
+        return RebindDecision::Refuse(Refusal::WrongOrigin);
+    }
+    if existing.label != label {
+        return RebindDecision::Refuse(Refusal::UnknownLabel);
+    }
+    // A no-op rebind must not record the current id as "previous" — that would
+    // start a watch on an address identical to the live one.
+    let previous = if existing.contract == contract {
+        existing.previous
+    } else {
+        Some(existing.contract)
+    };
+    RebindDecision::Rebind {
+        record: GameRecord {
+            contract,
+            previous,
+            ..existing.clone()
+        },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignDecision {
     /// Sign the body and persist `updated`. For an identical retry `updated`
