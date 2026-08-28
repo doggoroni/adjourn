@@ -32,9 +32,12 @@ rounded off:
   on the same contract id -- which is also the direct observation that both
   players derived identical `GameParams`. See `CLAUDE.md`, "Runtime
   assumptions, verified".
-- **`adjourn show` polling did NOT see the propagated move**, and that is
-  correct behaviour rather than a defect -- see section 2b's "Reading the
-  result correctly". Use `watch` to confirm propagation.
+- **Whether a node that missed an update recovers by subscribing is
+  UNRESOLVED**, and there is a report of a late subscriber never catching up.
+  See section 2b. Do not assume a stuck board will recover on its own.
+- **The two-node shape (a player doubling as the gateway) is not reliable** --
+  reported as failing to complete a game across two attempts. Use the
+  three-node shape.
 
 ## 0. Prerequisites
 
@@ -189,21 +192,35 @@ observation that both players derived byte-identical `GameParams`, the
 property whose failure mode is two players sitting on separate contracts with
 no error anywhere.
 
-### Reading the result correctly -- this part is a trap
+### What is and is not established about a node falling behind
 
-With the peered pair, a move DOES cross. But **`adjourn show` will not
-necessarily show you that**, and mistaking its answer for a propagation
-failure costs an hour.
+An earlier version of this section told you to use `watch` rather than `show`
+because `show` "serves stale local state". **That was wrong as a general
+claim and has been removed.** On the three-node topology, a node that had
+never subscribed picked up its opponent's move through plain `adjourn show`
+within 10 seconds and held it.
 
-`show` performs a one-shot NON-subscribing GET, and a node that already holds
-some state for a contract serves it locally rather than re-fetching. In the
-verified run, Bob's node sat at ply 2 through 90 seconds of polling with
-`show` while Alice was at ply 3. Running `adjourn watch --label bob` returned
-ply 3 immediately: `watch_label` issues its own SUBSCRIBING GET and merges
-what comes back, and that merge is what pulls a record the node had missed.
+What actually happened in the two-node run that produced that advice: Bob sat
+at ply 2 through 90s of `show` polling while Alice was at ply 3, and a
+subsequent `watch` printed ply 3. Two readings fit, and the data does not
+separate them -- the subscribing GET fetched the record on demand, or it
+simply arrived on its own in between. The two-node topology was also
+independently reported as failing to complete a game across two attempts, so
+the likeliest explanation is that the topology was unreliable rather than that
+`show` and `watch` differ in this way.
 
-So: **use `watch` to confirm propagation, not `show`.** `show` answers "what
-does this node already have", which is a different and much narrower question.
+**Unresolved, and important: a node that genuinely misses an update may NOT
+recover by subscribing.** One operator reports a `watch` on a confirmed
+subscription printing a single state and never advancing -- a late subscriber
+stranded for good. Nobody has yet run the experiment that settles it: take one
+node offline, play a move on the other, bring the first back, then subscribe
+and see whether it catches up.
+
+Until that is run, **do not assume a stuck game is recoverable.** If a board
+stops advancing, investigate rather than waiting -- a permanently stranded
+subscriber and a healthy idle correspondence game look identical from the
+outside, which is the failure mode `CLAUDE.md` treats as the project's central
+risk.
 
 ### The two facts that cost real time to learn
 

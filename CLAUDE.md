@@ -1153,41 +1153,51 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   freenet network     --gateway "192.168.1.121:31337,<64-hex-x25519-pubkey>"     --network-port 31338 --ws-api-port 7510     --skip-load-from-network --disable-auto-update     --data-dir .../bob/data --config-dir .../bob/config
   ```
 
-  A scholar's-mate line was played alternately against the two nodes. What
-  that first two-node run established, and the distinction is the useful part:
+  A scholar's-mate line was played alternately against the two nodes. **That
+  two-node run is NOT a clean result and must not be read as one** -- see the
+  correction below. What it showed:
 
-  - **`e2e4` (ply 1) crossed from Alice's node to Bob's.** Not directly
-    observed in transit, but entailed: `play_move` reads and projects the
-    state from the node it is talking to, so Bob's `e7e5` at ply 2 could not
-    have been signed unless Bob's node already held `e2e4`. The offer blob
-    conveys only `GameParams` and the contract id, never state, and the
-    contract is PUT empty -- so the record reached Bob's node over the
-    network.
-  - **`f1c4` (ply 3) did NOT appear on Bob's node for 90+ seconds** of polling
-    with `adjourn show`, which looks exactly like a propagation failure and is
-    not one. `show` is a one-shot NON-subscribing GET, and a node that already
-    holds some state for a contract serves it locally. Bob had ply 2 and kept
-    answering ply 2.
-  - **`adjourn watch --label bob` returned ply 3 immediately.** `watch_label`
-    issues its own SUBSCRIBING GET and merges what it returns rather than
-    discarding it. That merge is what pulled the missing record.
+  - **`e2e4` (ply 1) reached Bob's node.** Entailed rather than watched in
+    transit: `play_move` projects the state of the node it is talking to, so
+    Bob's `e7e5` at ply 2 could not have been signed unless Bob's node already
+    held `e2e4`. The offer blob carries only `GameParams` and the contract id,
+    never state, and the contract is PUT empty.
+  - **`f1c4` (ply 3) did not appear on Bob via 90+ seconds of `adjourn show`
+    polling**, and then a single `adjourn watch --label bob` printed ply 3.
 
-  So the subscribing-GET merge, whose justification in "Client" below had until
-  now been an argument rather than a measurement, is what makes a peer converge
-  after it has fallen behind. A `watch` built on the non-subscribing GET alone
-  would have sat on ply 2 indefinitely, showing a stale board with no error --
-  the precise failure that section predicts.
+  **Do not conclude from that pair of observations that `show` serves stale
+  state and `watch` backfills a node that fell behind.** An earlier version of
+  this section said exactly that, and it does not survive testing. On the
+  three-node topology below, a node that had NEVER subscribed picked up the
+  opponent's move through plain `adjourn show` within 10 seconds and held it
+  (fresh game, labels `lag-a`/`lag-b`, 2026-08-27). `show` is not
+  systematically stale.
 
-  Read the `show` result narrowly. It says `show` reports only that node's own
-  storage, which is what `show` is documented to do. It does not say updates
-  fail to propagate to a subscribed peer.
+  The likelier reading of the two-node run is that **the player-as-gateway
+  topology itself was unreliable** -- a second operator reports it failing to
+  complete a game across two separate attempts -- and that ply 3 had simply
+  not reached Bob during the polling window. Whether the subscribing GET
+  fetched it on demand, or it arrived on its own between the last `show` and
+  the `watch`, is not distinguishable from the data collected.
+
+  **OPEN, and worth settling before anyone relies on it: does a node that
+  genuinely missed an update recover by subscribing?** The same operator
+  reports a `watch` on a confirmed subscription printing one state and never
+  advancing -- i.e. a late subscriber stranded permanently. That directly
+  contradicts the reading above, and this project has no experiment that
+  separates the two. The test to run is a node taken offline while its
+  opponent moves, brought back, and then subscribed. Until that is run, assume
+  nothing about recovery: **a stuck game may not be recoverable by
+  subscribing**, and the failure mode this file cares about -- a player waiting
+  on a board that will never advance, with no error anywhere -- is exactly the
+  shape this would take.
 
   **A FULL GAME TO MATE then completed on a three-node topology**, same date
   and version: a dedicated gateway holding no player (`--is-gateway`,
   ws-api 7508) plus two player peers dialling it (ws-api 7509 and 7510,
-  network ports 31338 and 31339). This is the better shape and the one to
-  copy -- neither player needs a public address, and a player is a peer rather
-  than infrastructure.
+  network ports 31338 and 31339). Use this shape. Neither player needs a
+  public address, a player is a peer rather than infrastructure, and unlike
+  the two-node arrangement it has actually carried a game to completion.
 
   Both nodes independently reported the same final state:
 
