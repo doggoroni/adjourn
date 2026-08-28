@@ -32,9 +32,9 @@ rounded off:
   on the same contract id -- which is also the direct observation that both
   players derived identical `GameParams`. See `CLAUDE.md`, "Runtime
   assumptions, verified".
-- **Whether a node that missed an update recovers by subscribing is
-  UNRESOLVED**, and there is a report of a late subscriber never catching up.
-  See section 2b. Do not assume a stuck board will recover on its own.
+- **A node that misses an update recovers**, without needing to subscribe --
+  verified both for a never-subscribed node and for one killed and restarted
+  across the update. See section 2b.
 - **The two-node shape (a player doubling as the gateway) is not reliable** --
   reported as failing to complete a game across two attempts. Use the
   three-node shape.
@@ -209,18 +209,19 @@ independently reported as failing to complete a game across two attempts, so
 the likeliest explanation is that the topology was unreliable rather than that
 `show` and `watch` differ in this way.
 
-**Unresolved, and important: a node that genuinely misses an update may NOT
-recover by subscribing.** One operator reports a `watch` on a confirmed
-subscription printing a single state and never advancing -- a late subscriber
-stranded for good. Nobody has yet run the experiment that settles it: take one
-node offline, play a move on the other, bring the first back, then subscribe
-and see whether it catches up.
+**Resolved: a node that misses an update recovers, without subscribing.**
+Two tests on the three-node topology, fresh game:
 
-Until that is run, **do not assume a stuck game is recoverable.** If a board
-stops advancing, investigate rather than waiting -- a permanently stranded
-subscriber and a healthy idle correspondence game look identical from the
-outside, which is the failure mode `CLAUDE.md` treats as the project's central
-risk.
+- A node that had never subscribed picked up its opponent's move via plain
+  `adjourn show` within 10 seconds.
+- A node killed while its opponent moved, then restarted, reported the new ply
+  via `show` within 10 seconds of coming back -- again without subscribing.
+
+So a stuck board is NOT the expected behaviour here, and if you see one,
+investigate rather than assuming it will resolve. Both contrary reports -- a
+stale `show`, and a `watch` that printed one state and never advanced -- came
+from the two-node player-as-gateway shape, which also failed to complete a
+game twice. Use the three-node shape and the question does not arise.
 
 ### The two facts that cost real time to learn
 

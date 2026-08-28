@@ -1180,17 +1180,35 @@ Against a live `freenet 0.2.130` node, following `docs/runbook-two-nodes.md`,
   fetched it on demand, or it arrived on its own between the last `show` and
   the `watch`, is not distinguishable from the data collected.
 
-  **OPEN, and worth settling before anyone relies on it: does a node that
-  genuinely missed an update recover by subscribing?** The same operator
-  reports a `watch` on a confirmed subscription printing one state and never
-  advancing -- i.e. a late subscriber stranded permanently. That directly
-  contradicts the reading above, and this project has no experiment that
-  separates the two. The test to run is a node taken offline while its
-  opponent moves, brought back, and then subscribed. Until that is run, assume
-  nothing about recovery: **a stuck game may not be recoverable by
-  subscribing**, and the failure mode this file cares about -- a player waiting
-  on a board that will never advance, with no error anywhere -- is exactly the
-  shape this would take.
+  **RESOLVED 2026-08-27: a node that misses an update DOES recover, and it
+  does not need to subscribe to do so.** Two experiments on the three-node
+  topology, fresh game, labels `lag-a`/`lag-b`:
+
+  - *Never subscribed, stayed up.* `lag-b` had never issued a subscribing GET.
+    The opponent moved; plain `adjourn show` on `lag-b` reported the new ply
+    within 10 seconds and held it across 40s of polling.
+  - *Offline during the update.* `lag-b`'s node was killed, the opponent played
+    `f1c4` while it was down, and the node was restarted. Within 10 seconds
+    `show` reported ply 3 -- again with no subscription -- stable across 50s
+    of polling, and a subsequent `watch` agreed.
+
+  So there is no permanently stranded late subscriber here, `show` is not
+  systematically stale, and `watch` is not doing any backfilling that `show`
+  cannot. State converges and an ordinary GET sees it.
+
+  The contrary reports -- this file's own earlier claim that `show` served a
+  stale ply while `watch` revealed the true one, and a second operator's
+  observation of a `watch` on a confirmed subscription printing one state and
+  never advancing -- both come from the TWO-NODE player-as-gateway topology,
+  which independently failed to complete a game across two attempts. The
+  variable is the topology, not `show` versus `watch`. Neither observation
+  supports a claim about the mechanism, and both were briefly written up here
+  as if they did.
+
+  One limit worth stating: the offline test restarted the node, so it conflates
+  "missed a broadcast" with "restarted and re-fetched". A node that stays up
+  and misses a broadcast is covered by the first experiment, which also
+  recovered -- but by a route this pair of tests does not separate.
 
   **A FULL GAME TO MATE then completed on a three-node topology**, same date
   and version: a dedicated gateway holding no player (`--is-gateway`,
