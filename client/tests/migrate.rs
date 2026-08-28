@@ -1,10 +1,11 @@
 mod common;
 
 use adjourn_client::fake::{shared_world, FakeNode};
+use adjourn_client::node::NodeClient;
 use adjourn_client::session::{
     game_bind, invite_accept, invite_new, migrate_label, open_game_view, play_move, MigrateOutcome,
 };
-use adjourn_core::delegate_api::Side;
+use adjourn_core::delegate_api::{Request, Response, Side};
 
 /// Pins the PUT-before-Rebind ordering. `FakeNode`'s `put` and `delegate`
 /// both otherwise succeed unconditionally, so nothing else in this file (or
@@ -14,13 +15,24 @@ use adjourn_core::delegate_api::Side;
 /// assertion that follows is exactly what "a failed PUT leaves the game
 /// exactly where it was" means: still bound to the OLD contract id, and still
 /// readable there.
+///
+/// The binding is read through a raw `Request::ListGames` round trip
+/// (matching `delegates/adjourn-delegate/tests/adapter.rs`'s pattern),
+/// deliberately NOT through `open_game_view`/`bound_game`: those derive a
+/// contract id from `contract_wasm` and would raise their own build-mismatch
+/// error the moment the recorded id and the wasm-derived id disagree -- which
+/// is exactly the state a wrongly-ordered `migrate_label` can leave behind
+/// after a bad Rebind, so going through them would mask the property under
+/// an unrelated panic instead of observing it.
 #[tokio::test]
 async fn a_failed_put_leaves_the_game_bound_to_the_old_contract() {
     let Some((mut alice, mut bob, wasm)) = setup().await else {
         return eprintln!("skipping: run ./scripts/build-contract.sh first");
     };
     let mut variant = wasm.clone();
-    variant.extend_from_slice(b"\0\0variant");
+    variant.push(0);
+    variant.push(0);
+    variant.extend_from_slice(b"variant");
 
     play_move(&mut alice, "alice", "e2e4", wasm.clone())
         .await
@@ -36,11 +48,28 @@ async fn a_failed_put_leaves_the_game_bound_to_the_old_contract() {
         "got: {err:#}"
     );
 
-    // Still bound to the OLD contract, and still readable there -- the
-    // delegate was never told about a new id, because Rebind runs after PUT.
-    let after = open_game_view(&mut bob, "bob", wasm).await.unwrap();
-    assert_eq!(after.contract, before.contract);
-    assert_eq!(after.status.ply, before.status.ply);
+    // Still bound to the OLD contract -- read straight off the delegate's
+    // ListGames response, which names the recorded contract id without
+    // deriving one from any wasm build.
+    let bound_contract = bound_contract_of(&mut bob, "bob").await;
+    assert_eq!(
+        bound_contract,
+        Some(before.contract),
+        "the delegate must still point at the OLD contract after a failed PUT"
+    );
+}
+
+/// The contract id the delegate has recorded for `label`, read via a raw
+/// `Request::ListGames` round trip -- no contract id is derived here, so this
+/// cannot itself hit a build-mismatch path.
+async fn bound_contract_of<N: NodeClient>(node: &mut N, label: &str) -> Option<[u8; 32]> {
+    let Response::Games(games) = node.delegate(Request::ListGames).await.unwrap() else {
+        panic!("expected Response::Games");
+    };
+    games
+        .into_iter()
+        .find(|g| g.label == label)
+        .and_then(|g| g.contract)
 }
 
 /// Same shape as `client/tests/moves.rs::setup`: invite, accept, bind, and
@@ -72,7 +101,9 @@ async fn migrating_moves_a_game_to_the_new_contract_id() {
         return eprintln!("skipping: run ./scripts/build-contract.sh first");
     };
     let mut variant = wasm.clone();
-    variant.extend_from_slice(b"\0\0variant");
+    variant.push(0);
+    variant.push(0);
+    variant.extend_from_slice(b"variant");
 
     play_move(&mut alice, "alice", "e2e4", wasm.clone())
         .await
@@ -106,7 +137,9 @@ async fn migrating_twice_is_a_no_op_the_second_time() {
         return eprintln!("skipping: run ./scripts/build-contract.sh first");
     };
     let mut variant = wasm.clone();
-    variant.extend_from_slice(b"\0\0variant");
+    variant.push(0);
+    variant.push(0);
+    variant.extend_from_slice(b"variant");
 
     play_move(&mut alice, "alice", "e2e4", wasm.clone())
         .await
