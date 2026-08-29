@@ -90,7 +90,7 @@ const DOMAIN_BODY: &[u8] = b"adjourn-v1/delegate-body";
 ///
 /// Bump this whenever `GameRecord`'s layout changes, and teach the reader how to
 /// migrate the old shape rather than widening the check.
-pub const GAME_RECORD_FORMAT: u8 = 2;
+pub const GAME_RECORD_FORMAT: u8 = 3;
 
 /// What the delegate knows about one game. Persisted in the secret store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +117,19 @@ pub struct GameRecord {
     /// read local state for the best-effort legality check.
     #[serde(with = "serde_bytes")]
     pub contract: [u8; 32],
+    /// Contract instance id this game was bound to BEFORE a migration, or
+    /// `None` if it has never been migrated.
+    ///
+    /// Kept so a client can keep watching the old address after moving a game
+    /// to a rebuilt contract: if the opponent has not migrated, their moves
+    /// keep landing there, and a game that silently stops advancing is the
+    /// failure mode this project treats as the worst one.
+    ///
+    /// `#[serde(default)]` is safe HERE and nowhere near `last_signed_ply`:
+    /// defaulting an id to `None` loses no safety property, while defaulting a
+    /// ply counter to 0 disarms the double-sign guard.
+    #[serde(with = "serde_bytes", default)]
+    pub previous: Option<[u8; 32]>,
     /// Quality of the entropy this game's key was generated with. Recorded
     /// because a `Degraded` key's security properties differ from a
     /// `HostBacked` one, and that difference must survive a dropped
@@ -135,6 +148,29 @@ pub struct GameRecord {
 impl GameRecord {
     pub fn game_id(&self) -> [u8; 32] {
         self.params.game_id()
+    }
+}
+
+/// Bring a decoded record up to [`GAME_RECORD_FORMAT`], or refuse it.
+///
+/// The delegate's secret store is forward-carried across generations
+/// (`RegisterDelegate` copies LOCAL secrets into the new namespace), so a
+/// newer delegate WILL read records an older one wrote. Refusing an old shape
+/// outright would strand every game already bound; silently accepting one
+/// would risk reading a field that meant something else. So: migrate the
+/// shapes we know, refuse everything else.
+pub fn migrate_record(rec: GameRecord) -> Option<GameRecord> {
+    match rec.format {
+        GAME_RECORD_FORMAT => Some(rec),
+        // v2 -> v3 added `previous`. Every other field carries over
+        // unchanged — in particular `last_signed_ply`, which must never be
+        // reset by a migration.
+        2 => Some(GameRecord {
+            format: GAME_RECORD_FORMAT,
+            previous: None,
+            ..rec
+        }),
+        _ => None,
     }
 }
 
@@ -201,9 +237,67 @@ pub fn decide_bind(
             side: color.into(),
             origin,
             contract,
+            previous: None,
             entropy,
             last_signed_ply: 0,
             last_move_body_hash: [0u8; 32],
+        },
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RebindDecision {
+    Rebind { record: GameRecord },
+    Refuse(Refusal),
+}
+
+/// Point `label`'s bound game at a new contract instance.
+///
+/// Everything that carries a security property is preserved verbatim:
+/// `last_signed_ply` and `last_move_body_hash` (the double-sign guard),
+/// `params` and `side` (who may sign what), and `origin` (who may call at
+/// all). Only the address changes.
+///
+/// Deliberately trust-the-client: the delegate cannot verify that `contract`
+/// really derives from the stored params — that is `hash(code, params)` and
+/// the delegate has no contract code and no way to hash it. The id check is
+/// therefore a build-mismatch guard, not a security boundary; rebinding
+/// touches neither the signing key nor the ply counter.
+pub fn decide_rebind(
+    existing: Option<&GameRecord>,
+    label: &str,
+    contract: [u8; 32],
+    origin: Option<[u8; 32]>,
+) -> RebindDecision {
+    let Some(existing) = existing else {
+        return RebindDecision::Refuse(Refusal::NotBound);
+    };
+    // Before anything else: if the layout is not ours, no field inside it can
+    // be trusted — including the origin we are about to check.
+    if existing.format != GAME_RECORD_FORMAT {
+        return RebindDecision::Refuse(Refusal::StaleRecordFormat {
+            found: existing.format,
+            expected: GAME_RECORD_FORMAT,
+        });
+    }
+    if existing.origin != origin {
+        return RebindDecision::Refuse(Refusal::WrongOrigin);
+    }
+    if existing.label != label {
+        return RebindDecision::Refuse(Refusal::UnknownLabel);
+    }
+    // A no-op rebind must not record the current id as "previous" — that would
+    // start a watch on an address identical to the live one.
+    let previous = if existing.contract == contract {
+        existing.previous
+    } else {
+        Some(existing.contract)
+    };
+    RebindDecision::Rebind {
+        record: GameRecord {
+            contract,
+            previous,
+            ..existing.clone()
         },
     }
 }

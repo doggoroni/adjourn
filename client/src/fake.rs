@@ -117,6 +117,14 @@ pub struct FakeNode {
     /// hide exactly the lost-update window `watch_label` has to defend
     /// against.
     subscribed: BTreeMap<[u8; 32], usize>,
+    /// Test-only failure injection: when `true`, the NEXT `put` call returns
+    /// `Err` instead of writing, and the flag resets itself. Off by default so
+    /// no existing test's behaviour changes. Exists to pin the PUT-before-Rebind
+    /// ordering in `migrate_label` -- `FakeNode`'s `put` and `delegate` both
+    /// otherwise succeed unconditionally, so a version of `migrate_label` that
+    /// issued `Rebind` before `put` would pass every test identically. See
+    /// `client/tests/migrate.rs::a_failed_put_leaves_the_game_bound_to_the_old_contract`.
+    fail_next_put: bool,
 }
 
 impl FakeNode {
@@ -129,7 +137,15 @@ impl FakeNode {
             world,
             cursor: 0,
             subscribed: BTreeMap::new(),
+            fail_next_put: false,
         }
+    }
+
+    /// Arm a one-shot failure for the next `put` call. Used to prove ordering
+    /// properties that `FakeNode`'s otherwise-unconditional success would
+    /// hide -- see the field doc on `fail_next_put`.
+    pub fn fail_next_put(&mut self) {
+        self.fail_next_put = true;
     }
 
     /// Test helper: seed the shared world with raw bytes for an id, bypassing
@@ -183,6 +199,10 @@ impl NodeClient for FakeNode {
     }
 
     async fn put(&mut self, container: ContractContainer, state: Vec<u8>) -> anyhow::Result<()> {
+        if self.fail_next_put {
+            self.fail_next_put = false;
+            return Err(anyhow::anyhow!("fake node: injected PUT failure"));
+        }
         let id = *container.id();
         let mut world = self.world.lock().expect("world lock poisoned");
         world

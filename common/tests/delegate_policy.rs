@@ -1,7 +1,7 @@
 use adjourn_core::delegate_api::{EntropyQuality, GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::delegate_policy::{
-    classify_host_entropy, decide_bind, decide_sign, derive_seed, BindDecision, GameRecord,
-    HostEntropy, SignDecision, GAME_RECORD_FORMAT,
+    classify_host_entropy, decide_bind, decide_rebind, decide_sign, derive_seed, migrate_record,
+    BindDecision, GameRecord, HostEntropy, RebindDecision, SignDecision, GAME_RECORD_FORMAT,
 };
 use adjourn_core::{Body, GameParams, MAX_PLY};
 use ed25519_dalek::SigningKey;
@@ -487,8 +487,8 @@ fn rebinding_from_a_different_origin_is_refused() {
 }
 
 #[test]
-fn the_record_format_is_now_two() {
-    assert_eq!(GAME_RECORD_FORMAT, 2);
+fn the_record_format_is_now_three() {
+    assert_eq!(GAME_RECORD_FORMAT, 3);
 }
 
 #[test]
@@ -621,6 +621,7 @@ fn a_game_summary_with_params_and_contract_round_trips_through_cbor() {
         entropy: Some(EntropyQuality::HostBacked),
         params: Some(params.clone()),
         contract: Some(CONTRACT),
+        previous: None,
     };
     let resp = Response::Games(vec![summary.clone()]);
 
@@ -666,4 +667,244 @@ fn the_new_and_changed_bodies_round_trip_through_cbor() {
             "round-tripped record must still verify"
         );
     }
+}
+
+fn sample_record() -> GameRecord {
+    let (_w, _b, params) = game();
+    GameRecord {
+        format: GAME_RECORD_FORMAT,
+        label: "alice".into(),
+        params,
+        side: Side::White,
+        origin: None,
+        contract: [3u8; 32],
+        previous: None,
+        entropy: EntropyQuality::HostBacked,
+        last_signed_ply: 0,
+        last_move_body_hash: [0u8; 32],
+    }
+}
+
+#[test]
+fn rebind_updates_the_contract_and_records_the_previous_one() {
+    let mut rec = sample_record();
+    rec.contract = [1u8; 32];
+    rec.last_signed_ply = 5;
+    // Distinctive and non-zero: sample_record()'s default is [0u8; 32], which a
+    // dropped field would silently preserve by accident. Only a distinct value
+    // proves the double-sign guard's body hash actually survives a rebind.
+    rec.last_move_body_hash = [7u8; 32];
+
+    match decide_rebind(Some(&rec), "alice", [2u8; 32], None) {
+        RebindDecision::Rebind { record } => {
+            assert_eq!(record.contract, [2u8; 32]);
+            assert_eq!(record.previous, Some([1u8; 32]));
+            assert_eq!(
+                record.last_signed_ply, 5,
+                "the ply counter must survive a rebind"
+            );
+            assert_eq!(
+                record.last_move_body_hash, [7u8; 32],
+                "the double-sign guard's body hash must survive a rebind"
+            );
+            assert_eq!(record.params, rec.params);
+            assert_eq!(record.side, rec.side);
+            assert_eq!(record.origin, rec.origin);
+        }
+        other => panic!("expected Rebind, got {other:?}"),
+    }
+}
+
+/// Idempotent: rebinding to the id already recorded changes nothing, and in
+/// particular must NOT set `previous` to the current id and start watching
+/// an address that is the same as the live one.
+#[test]
+fn rebinding_to_the_same_contract_is_a_no_op() {
+    let mut rec = sample_record();
+    rec.contract = [1u8; 32];
+    rec.previous = None;
+
+    match decide_rebind(Some(&rec), "alice", [1u8; 32], None) {
+        RebindDecision::Rebind { record } => {
+            assert_eq!(record.contract, [1u8; 32]);
+            assert_eq!(
+                record.previous, None,
+                "a no-op rebind must not invent a previous id"
+            );
+        }
+        other => panic!("expected a no-op Rebind, got {other:?}"),
+    }
+}
+
+#[test]
+fn rebind_refuses_a_label_with_no_bound_game() {
+    assert!(matches!(
+        decide_rebind(None, "alice", [2u8; 32], None),
+        RebindDecision::Refuse(Refusal::NotBound)
+    ));
+}
+
+/// Same origin rule as every other call: a web-app game keeps full protection,
+/// and a `None` game refuses any caller that presents an origin.
+#[test]
+fn rebind_refuses_a_different_origin() {
+    let mut rec = sample_record();
+    rec.origin = Some([9u8; 32]);
+    assert!(matches!(
+        decide_rebind(Some(&rec), "alice", [2u8; 32], Some([8u8; 32])),
+        RebindDecision::Refuse(Refusal::WrongOrigin)
+    ));
+}
+
+/// A record whose layout is not ours cannot be trusted field by field.
+///
+/// The record ALSO carries an origin that differs from the caller's (`None`
+/// here, `Some([8u8; 32])` on the record), so this only passes if the format
+/// check runs BEFORE the origin check. With both `None`, a version that
+/// checked origin first would also return `StaleRecordFormat` by accident
+/// (there'd be nothing to disagree about) and this test would not catch the
+/// reordering. Do not "simplify" this back to a bare `None`/`None` pair.
+#[test]
+fn rebind_refuses_an_unmigratable_format() {
+    let mut rec = sample_record();
+    rec.format = 200;
+    rec.origin = Some([8u8; 32]);
+    assert!(matches!(
+        decide_rebind(Some(&rec), "alice", [2u8; 32], None),
+        RebindDecision::Refuse(Refusal::StaleRecordFormat { .. })
+    ));
+}
+
+/// A format-2 record must be UPGRADED, not rejected. Refusing it would break
+/// every game already bound — the games this feature exists to save.
+#[test]
+fn a_format_2_record_migrates_to_the_current_format() {
+    let mut old = sample_record();
+    old.format = 2;
+    old.previous = None;
+    old.last_signed_ply = 7;
+
+    let migrated = migrate_record(old.clone()).expect("format 2 must migrate");
+    assert_eq!(migrated.format, GAME_RECORD_FORMAT);
+    assert_eq!(
+        migrated.previous, None,
+        "a format-2 record has no previous id"
+    );
+}
+
+/// The whole point of the format field. If migration silently zeroed this,
+/// the double-sign guard would be disarmed on a live game.
+#[test]
+fn migration_preserves_last_signed_ply_and_every_other_field() {
+    let mut old = sample_record();
+    old.format = 2;
+    old.last_signed_ply = 9;
+    old.last_move_body_hash = [7u8; 32];
+
+    let migrated = migrate_record(old.clone()).expect("format 2 must migrate");
+    assert_eq!(
+        migrated.last_signed_ply, 9,
+        "ply counter must survive migration"
+    );
+    assert_eq!(migrated.last_move_body_hash, [7u8; 32]);
+    assert_eq!(migrated.label, old.label);
+    assert_eq!(migrated.params, old.params);
+    assert_eq!(migrated.side, old.side);
+    assert_eq!(migrated.origin, old.origin);
+    assert_eq!(migrated.contract, old.contract);
+    assert_eq!(migrated.entropy, old.entropy);
+}
+
+/// Migrate the shapes we know; refuse the rest. Never widen the check.
+#[test]
+fn an_unknown_format_does_not_migrate() {
+    for bad in [0u8, 1, 4, 255] {
+        let mut rec = sample_record();
+        rec.format = bad;
+        assert!(
+            migrate_record(rec).is_none(),
+            "format {bad} must not migrate — widening this check is how a \
+             future layout gets silently misread"
+        );
+    }
+}
+
+#[test]
+fn a_current_format_record_passes_through_unchanged() {
+    let rec = sample_record();
+    assert_eq!(rec.format, GAME_RECORD_FORMAT);
+    assert_eq!(migrate_record(rec.clone()), Some(rec));
+}
+
+/// A real byte-for-byte format-2 payload, decoded through serde rather than
+/// built as a `GameRecord { format: 2, .. }` literal with `previous: None`
+/// set by hand. Every format-2 test above this one constructs a `GameRecord`
+/// value directly -- and a `GameRecord` literal always HAS a `previous`
+/// field, because the Rust type does. None of them can exercise whether the
+/// wire decode actually tolerates a payload that PHYSICALLY LACKS the field,
+/// which is the only shape a real pre-migration secret-store entry can ever
+/// be (format 2 predates the field entirely). That is exactly the case
+/// `#[serde(default)]` on `GameRecord.previous` exists to survive -- see its
+/// doc comment in `delegate_policy.rs` -- and nothing before this test ever
+/// encoded bytes without it.
+///
+/// This struct is `GameRecord`'s v2 shape: identical field names and
+/// `#[serde(rename/with)]` attributes, minus `previous`, so ciborium's
+/// struct-as-map encoding produces exactly what a v2 delegate actually wrote.
+#[derive(serde::Serialize)]
+struct GameRecordFormat2 {
+    #[serde(rename = "v")]
+    format: u8,
+    label: String,
+    params: GameParams,
+    side: Side,
+    #[serde(with = "serde_bytes")]
+    origin: Option<[u8; 32]>,
+    #[serde(with = "serde_bytes")]
+    contract: [u8; 32],
+    entropy: EntropyQuality,
+    last_signed_ply: u16,
+    #[serde(with = "serde_bytes")]
+    last_move_body_hash: [u8; 32],
+}
+
+#[test]
+fn a_format_2_payload_decodes_with_previous_defaulted_to_none() {
+    let (_w, _b, params) = game();
+    let old = GameRecordFormat2 {
+        format: 2,
+        label: "alice".into(),
+        params,
+        side: Side::White,
+        origin: Some([9u8; 32]),
+        contract: [3u8; 32],
+        entropy: EntropyQuality::HostBacked,
+        last_signed_ply: 11,
+        last_move_body_hash: [5u8; 32],
+    };
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&old, &mut bytes).expect("encode a real format-2 payload");
+
+    let rec: GameRecord = ciborium::from_reader(bytes.as_slice())
+        .expect("a format-2 payload lacking `previous` must still decode as GameRecord");
+
+    // Decoding alone does not upgrade the format -- that is `migrate_record`'s
+    // job, exercised separately below.
+    assert_eq!(rec.format, 2);
+    assert_eq!(
+        rec.previous, None,
+        "a payload with no `previous` field must default it to None on decode, \
+         not fail to decode at all"
+    );
+    assert_eq!(
+        rec.last_signed_ply, 11,
+        "the double-sign guard's counter must survive intact through the same decode"
+    );
+    assert_eq!(rec.origin, Some([9u8; 32]), "origin must survive intact");
+
+    let migrated = migrate_record(rec).expect("format 2 must still migrate to the current one");
+    assert_eq!(migrated.format, GAME_RECORD_FORMAT);
+    assert_eq!(migrated.previous, None);
+    assert_eq!(migrated.last_signed_ply, 11);
 }

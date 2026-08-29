@@ -222,3 +222,132 @@ fn binding_a_label_under_a_different_origin_than_created_it_is_refused() {
         Response::Refused(Refusal::WrongOrigin)
     ));
 }
+
+/// Drive the REAL dispatch path, not just the policy beneath it: a bound game
+/// is repointed to a new contract instance and the old one is kept as
+/// `previous`.
+#[test]
+fn rebind_repoints_a_bound_game_through_the_real_dispatch() {
+    let mut store = MemoryStore::default();
+
+    let Response::GameKey { public_key, .. } = handle(
+        &mut store,
+        None,
+        Request::CreateGameKey {
+            label: "alice".into(),
+            caller_entropy: Some([9u8; 32]),
+        },
+    ) else {
+        panic!("expected a key");
+    };
+    let b = SigningKey::from_bytes(&[2u8; 32]);
+    let params = GameParams {
+        white: public_key,
+        black: b.verifying_key().to_bytes(),
+        nonce: [7u8; 16],
+    };
+
+    let Response::Bound { game_id } = handle(
+        &mut store,
+        None,
+        Request::BindGame {
+            label: "alice".into(),
+            params: params.clone(),
+            contract: CONTRACT,
+        },
+    ) else {
+        panic!("expected a bind");
+    };
+
+    let new_contract = [6u8; 32];
+    let resp = handle(
+        &mut store,
+        None,
+        Request::Rebind {
+            label: "alice".into(),
+            contract: new_contract,
+        },
+    );
+    assert!(matches!(resp, Response::Bound { .. }), "got {resp:?}");
+
+    let Response::Games(games) = handle(&mut store, None, Request::ListGames) else {
+        panic!("expected a list");
+    };
+    let g = games.iter().find(|g| g.label == "alice").unwrap();
+    assert_eq!(g.game_id, Some(game_id));
+    assert_eq!(g.contract, Some(new_contract));
+    // `previous` must survive to the client -- otherwise the skew detection
+    // this exists to support has nothing to observe.
+    assert_eq!(g.previous, Some(CONTRACT));
+}
+
+/// A label that was never bound has no game record for `Rebind` to touch.
+#[test]
+fn rebind_refuses_a_label_that_was_never_bound() {
+    let mut store = MemoryStore::default();
+    let resp = handle(
+        &mut store,
+        None,
+        Request::Rebind {
+            label: "nobody".into(),
+            contract: [2u8; 32],
+        },
+    );
+    assert!(
+        matches!(resp, Response::Refused(Refusal::NotBound)),
+        "got {resp:?}"
+    );
+}
+
+/// The rebind equivalent of `binding_a_label_under_a_different_origin_than_created_it_is_refused`:
+/// a caller from a different origin than the one that bound the game must not
+/// be able to repoint it to an address of their choosing.
+#[test]
+fn rebinding_a_label_under_a_different_origin_than_bound_it_is_refused() {
+    let mut store = MemoryStore::default();
+    let owner = Some([1u8; 32]);
+
+    let Response::GameKey { public_key, .. } = handle(
+        &mut store,
+        owner,
+        Request::CreateGameKey {
+            label: "game1".into(),
+            caller_entropy: Some([9u8; 32]),
+        },
+    ) else {
+        panic!("expected a key");
+    };
+
+    let b = SigningKey::from_bytes(&[2u8; 32]);
+    let params = GameParams {
+        white: public_key,
+        black: b.verifying_key().to_bytes(),
+        nonce: [7u8; 16],
+    };
+
+    assert!(matches!(
+        handle(
+            &mut store,
+            owner,
+            Request::BindGame {
+                label: "game1".into(),
+                params,
+                contract: CONTRACT,
+            },
+        ),
+        Response::Bound { .. }
+    ));
+
+    // Same label, different (here: absent) origin.
+    assert!(matches!(
+        handle(
+            &mut store,
+            None,
+            Request::Rebind {
+                label: "game1".into(),
+                contract: [6u8; 32],
+            },
+        ),
+        Response::Refused(Refusal::WrongOrigin)
+    ));
+}

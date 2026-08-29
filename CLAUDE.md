@@ -215,8 +215,8 @@ The delegate's secret store is the opposite case. `RegisterDelegate` carries a
 `predecessors` list and the node copies LOCAL-scope secrets forward into the new
 generation's namespace, so a future delegate **will** read records this one
 wrote. `GameRecord` therefore carries `format: u8` (`GAME_RECORD_FORMAT`,
-currently 2), checked at the top of both `decide_bind` and `decide_sign` before
-any other field is trusted.
+currently 3), checked at the top of `decide_bind`, `decide_sign` and
+`decide_rebind` before any other field is trusted.
 
 The failure being defended against is a decode *success*, not a decode error: a
 later version that adds a `#[serde(default)]` field would let serde deserialize
@@ -225,6 +225,20 @@ double-sign guard on a real in-progress game. Bump the constant whenever the
 layout changes and teach the reader to migrate the old shape — never widen the
 check. Tests: `a_record_from_another_format_cannot_be_signed_against`,
 `the_format_check_precedes_every_other_check`.
+
+Format 3 (added for contract-key migration, see "Delegate" below) is the
+first case this rule actually had to earn its keep on: format 2 is
+**migrated, not refused**. `delegates/adjourn-delegate/src/secrets.rs::load_game`
+runs every decoded record through `migrate_record` before anything else can
+see it — a format-2 record comes back as format 3 with `previous: None` and
+every other field, including `last_signed_ply`, carried over unchanged; a
+format 3 record passes through; anything else is refused. Refusing format 2
+outright, the way the doc above once implied every future format bump would,
+was considered and rejected: it would have stranded every game already bound
+under format 2, which is exactly the population this feature exists to carry
+forward. "Migrate the old shape" above was written before there was a second
+format to migrate; this is the first test of whether that sentence was
+actually true.
 
 ## Wire format
 
@@ -364,6 +378,88 @@ pure function of the result set.
 - **Abandonment.** No timers means a player who stops leaves a contract that
   goes cold and gets evicted. Current answer: let it die, UI keeps a local PGN.
 
+- **A migrated player whose opponent never upgrades has a game that cannot
+  progress.** `adjourn game migrate` (see "Delegate" above) moves one player's
+  side of a bound game onto a rebuilt contract; it cannot make the opponent's
+  build follow. Skew detection makes the stuck state visible and specific — it
+  names which side is stale rather than reporting a generic stall — but
+  resolving it is out of band: either the opponent upgrades too, or the
+  migrator reverts to the old build. This design does not arbitrate that, and
+  should not: the players are the only ones who can decide which build to
+  standardise on.
+
+- **Two migrations by the same player erase detection of the first hop.**
+  `GameRecord.previous` is one slot (`common/src/delegate_policy.rs`), not a
+  history: migrating A→B sets `previous = A`; a later B→C **overwrites** it to
+  `previous = B`, not appends to it. If the opponent never followed past A,
+  their moves keep landing on A, which is now neither `previous` nor the
+  current contract — absent from both sides of the `C` vs `B` set difference
+  `opponent_moved_on_previous` computes. No skew is reported, the game stalls,
+  and the detector reports a healthy game. `previous` is therefore accurately
+  described as *overwritten*, not "never cleared" — the earlier wording in
+  this file implied the old value survives; it does not.
+
+  Not fixed here: the fix is a bounded chain (`previous: Vec<[u8; 32]>`, capped
+  the same way `MAX_PLY` bounds move records) so `opponent_moved_on_previous`
+  can check every prior id, not just the immediate one. That is a
+  `GAME_RECORD_FORMAT` bump touching the delegate, the client, and the UI, not
+  a fix to land inside a final pass. Extracting `delegate_policy`/`delegate_api`
+  into their own crate (the bullet above) would also reduce how often a
+  two-hop migration comes up in practice, by making a delegate-only change
+  less likely to force a contract-key rotation that prompts a second
+  `adjourn game migrate` in the first place — it does not eliminate the
+  two-hop case, only makes it rarer.
+
+- **A PUT-succeeded-but-Rebind-failed migration cannot recover once the old
+  contract is evicted.** `migrate_label` (`client/src/session.rs`) sequences
+  the state PUT to the new contract id before the delegate `Rebind` precisely
+  so a failure partway through is retryable (see "Delegate" above) — normally
+  a retry re-GETs the old id, which still holds the state, and completes the
+  `Rebind`. But if the node evicts the old, now-cold contract between the PUT
+  and a retried `Rebind`, that re-GET returns `Ok(None)` and `migrate_label`
+  errors, even though the state the migration was moving already sits, intact,
+  at the new id — only the delegate record needs repointing, and nothing
+  needs to be re-read from the contract that is gone. Not fixed here: the
+  narrow fix is letting `migrate_label` fall back to reading the state it
+  already has locally (or skip the re-GET and issue `Rebind` directly) when
+  the old id is confirmed to be the source of a prior successful PUT, but that
+  needs a way to distinguish "haven't PUT yet" from "PUT succeeded, old
+  evicted" that the current flow does not track.
+
+- **The UI's build-mismatch detector classifies on a substring of an error's
+  rendered prose, not on typed data.** `expected_container`
+  (`client/src/session.rs`) reports a build mismatch through a plain
+  `anyhow::bail!`, so `ui/src/conn.rs`'s classifier matches on `"build
+  mismatch"` and `"--label {label}"` appearing in the message text — the same
+  shape of hazard "An empty payload is not a decode failure" above warns
+  against elsewhere in this file, and `is_missing_contract` in
+  `client/src/node.rs` was written specifically to avoid it for the
+  missing-contract case. It has not caused a real bug yet because both strings
+  live in the same function that produces them, but a reworded message would
+  silently stop the UI from ever recognising the mismatch it exists to
+  surface. The honest fix is a typed error variant in `client/` that
+  `expected_container` returns and `conn.rs` matches on directly; recorded
+  here as a follow-up, not fixed as part of this feature.
+
+- **The contract-key rotation problem this feature works around is not fixed,
+  only worked around, and the crate boundary that causes it is fixable.**
+  `adjourn-core::delegate_policy` and `delegate_api` are delegate-only code —
+  the contract never calls into either — but they live in the same crate the
+  contract depends on, so a change confined to delegate policy can still sit
+  in `adjourn-core`'s dependency graph and, depending on what exactly changes
+  (see the empirical finding below), rotate the *contract's* key anyway. The
+  structural fix is to extract both modules into a crate the contract crate
+  does not depend on at all — one-directional, so the new crate may depend on
+  `adjourn-core` but never the reverse — which would make delegate-only
+  changes provably unable to touch the contract's dependency graph rather
+  than merely usually not touching it. Deliberately not done as part of this
+  feature: it is a crate extraction touching every consumer (`common/`,
+  `contracts/`, `delegates/`, `client/`), it deserves review as its own
+  change rather than riding along with migration, and — being itself a change
+  to `common/`'s shape — it would rotate the contract key once on its own,
+  which is not a cost to spend inside a feature whose whole point is
+  minimizing unnecessary rotations.
+
 ## Reproducible builds — the contract key
 
 The contract key is the hash of the compiled WASM, so **anything that changes
@@ -380,6 +476,43 @@ progress. Four things are pinned to prevent that:
    locations, so the key would depend on *who built it*. Cargo's `trim-paths`
    would be tidier but is unstable in 1.97.1 and would force nightly.
 
+**Delegate-only changes to `common/` do NOT always leave the contract
+byte-identical, and the migration spec's controlling assumption was too
+narrow.** The contract crate imports only `adjourn_core::state::{Delta,
+Summary}` and `adjourn_core::{GameParams, GameState}`, never
+`delegate_policy` or `delegate_api` — so a first probe, adding a bare `pub fn`
+to `delegate_policy.rs`, reproduced the pre-migration hash exactly
+(`875ac4d2…`, 267,003 bytes) and the migration design was written on the
+strength of that one measurement. That measurement was real but too narrow to
+generalise from. **Adding any new `Request` variant to `delegate_api` — a
+bare, unused unit variant, wired nowhere — rotates the contract hash anyway,**
+at identical size: `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`
+became `15beda67aa32da2e3274d57ab190114ccf3b73785be980776333d6822691e506`, both
+267,003 bytes. This was reproduced with controls before being trusted: two
+consecutive builds of the *same* source produced the same hash both times, so
+the build is deterministic and the rotation is a real effect of the source
+change, not build noise. The mechanism is not identified. `Cargo.toml` already
+sets `codegen-units = 1` and `lto = true` for this profile, so the obvious
+"more code moved a codegen-unit boundary" explanation does not hold — dead
+code from an unreferenced enum variant should not survive LTO into the
+contract's `.wasm` at all, and yet the hash moves. Treat "delegate-only code
+is dead from the contract's perspective" as **rebuttable**, not settled: rerun
+the hash check after any change to `common/`, including ones that look
+contract-irrelevant on inspection, rather than reasoning about what should be
+stripped.
+
+This branch's own migration feature *did* add a `Rebind` variant to the
+delegate's request enum, so it paid exactly this cost: **the contract key on
+this branch is `15beda67aa32da2e3274d57ab190114ccf3b73785be980776333d6822691e506`
+(267,003 bytes)**, measured directly with `./scripts/build-contract.sh`, not
+carried over from an earlier note. The rotation was accepted deliberately
+rather than designed around: no real games exist yet on any previous key, so
+there is nothing to strand, and the feature landing in the same branch that
+causes the rotation — contract-key migration — is itself the mitigation for
+exactly this class of accidental rotation going forward. See "Known issues,
+unresolved" above for the crate-boundary fix that would make this class of
+rotation provably impossible rather than merely unlikely.
+
 **Build the contract only via `scripts/build-contract.sh`.** A bare
 `cargo build --release` embeds your home directory and produces a different,
 unshippable key. The script fails loudly if a build path leaked.
@@ -389,10 +522,22 @@ prefixes, but the path separator style (`\` vs `/`) still differs, so Windows
 and Linux builds differ in bytes. `ubuntu-latest` in CI is the reference
 platform; local builds on other OSes are for development only.
 
-See https://freenet.org/build/manual/upgrading-contracts/ — River derives its
-contract key as `blake3(code_hash ‖ owner_key)` so invite links survive
-upgrades; worth copying that pattern if game URLs ever need to outlive a
-contract version.
+See https://freenet.org/build/manual/upgrading-contracts/. **Correction:**
+this used to say River derives its key as `blake3(code_hash ‖ owner_key)` "so
+invite links survive upgrades." That is wrong, and River's own
+`common/src/migration.rs` (vendored at `river/`) says the opposite: the room
+contract key is `BLAKE3(room_contract.wasm, params)`, so **every** WASM
+upgrade moves the key for every owner, exactly like adjourn's. Keys do not
+survive upgrades under any derivation. River's answer is a registry of every
+previous WASM code hash it has ever shipped
+(`LEGACY_ROOM_CONTRACT_CODE_HASHES`, 31 generations as vendored) and a client
+that probes those keys newest-to-oldest against an owner's verifying key to
+recover a dormant room — a search, because the client only ever knows the
+owner key, not which generation a given room is still on.
+
+adjourn needs no such registry. See "Delegate" below: the delegate records
+each game's actual contract id at bind time, so migrating a game means one
+`GET` against a known id, never a probe.
 
 ### Contract crate gotchas
 
@@ -584,6 +729,71 @@ machine-specific paths and produces a different, unshippable key.
   boundary for a CLI-bound game is that the node's WebSocket API is
   loopback-only — see "Runtime assumptions, verified" below, which records
   this confirmed against a live node.
+- **Contract-key migration: `Rebind` moves a bound game onto a rebuilt
+  contract.** `bound_game` (`client/src/session.rs`) refuses every move-flow
+  command when this build's derived contract id disagrees with the id the
+  delegate recorded at bind time — see "Reproducible builds" for how easily
+  that id moves. Before this feature the only fix was reverting to the old
+  build; there was no way forward. `adjourn game migrate --label <label>`
+  (`session.rs::migrate_label`) now does, in order: `GET` the state under the
+  *old* recorded id, `PUT` it under the id this build derives (unioning with
+  whatever the new contract already holds — merge is idempotent, so migrating
+  twice is a no-op), then send the delegate a `Rebind { label, contract }`
+  request. `Rebind` is handled by `decide_rebind` in
+  `common/src/delegate_policy.rs`, alongside `decide_bind` and `decide_sign` for
+  the same host-testable-on-Windows reason given above. It rewrites
+  `GameRecord.contract` to the new id and sets `GameRecord.previous:
+  Option<[u8; 32]>` to the old one, **preserving `last_signed_ply`, `origin`,
+  `params` and `game_id` unchanged** — a rebind changes which contract holds
+  the game, not who is signing or how far the game has progressed. The `PUT`
+  is deliberately sequenced before the `Rebind`: a `PUT` failure leaves the
+  game on the old id with no delegate state touched, while a `Rebind` failure
+  after a successful `PUT` leaves state sitting under both ids and re-running
+  `migrate` completes it — every ordering point in the flow is idempotent, on
+  purpose, because a correspondence player will retry a failed command without
+  installing anything and the flow has to tolerate that.
+
+  **`Rebind` is trust-the-client, by construction, and that is stated in the
+  code rather than left implicit.** `decide_rebind` cannot verify that the
+  `contract` id it is handed actually derives from the stored `params` and the
+  current WASM, because the delegate has no contract code to hash and no way
+  to reach code it does not embed. This is acceptable specifically because the
+  id check `Rebind` updates is a *build-mismatch guard* — it exists to catch
+  two players silently drifting onto different contract generations — and not
+  a security boundary: `Rebind` touches neither the signing key nor
+  `last_signed_ply`, so a client that lies about the id it derived can at
+  worst point its own delegate record at the wrong contract, which just makes
+  its own future move-flow commands fail the same mismatch check they were
+  already subject to. It cannot forge a signature or roll back the ply
+  counter.
+
+  **Skew detection is a set difference, not "have I heard from my opponent."**
+  While `GameRecord.previous` is `Some`, `watch_label` subscribes to both the
+  old and the new id (`opponent_moved_on_previous` in `session.rs`). The old
+  contract legitimately holds the entire pre-migration history, so presence of
+  opponent records there proves nothing; the signal is opponent-signed records
+  present on the *old* id and absent from the *new* one — proof the opponent
+  moved after this player migrated and has not followed. The check is
+  stateless (no stored migration ply to drift out of sync with reality) and is
+  edge-triggered rather than fire-once: `session::watch_label` reports
+  [`SKEW_WARNING`] on entering skew and [`SKEW_RESOLVED`] once the opponent's
+  records catch back up onto the current contract, so a UI banner does not
+  outlive the split it describes.
+
+  **Detection is one-sided, not symmetric — this corrects an earlier version
+  of this paragraph that claimed otherwise.** `previous` is set only by
+  `decide_rebind`, i.e. only on the delegate record of the player who ran
+  `migrate`. Only that player's `watch_label` ever calls
+  `check_previous_skew`/`opponent_moved_on_previous` at all — the opponent's
+  `GameRecord.previous` stays `None`, so their `watch_label` never subscribes
+  to a second id and never checks anything. If the migrating player's moves
+  stop reaching the opponent (rather than the other way around), the opponent
+  gets no check, no warning, and no error: their game simply stops advancing,
+  indistinguishable from an idle correspondence game. Only the player who
+  migrated can ever learn that the two sides have split.
+
+  `previous` is also never *cleared*, but is **overwritten**, not preserved,
+  by a second migration — see "Known issues, unresolved" below for both gaps.
 
 ## UI
 
@@ -914,17 +1124,17 @@ omission.
 
 ## Testing
 
-`cargo test --workspace --locked` — 168 tests: 99 in `adjourn-core` (24 algebra
-tests, 35 adversarial tests, and 40 delegate-policy tests), 17 contract tests,
-9 delegate adapter tests, 21 `adjourn-client` tests, and 22 `adjourn-ui` tests
-(8 board, 14 routing — see "UI" above for what that number does and does not
-cover). Two more `adjourn-ui` tests exist in `ui/tests/browser.rs` and are
-**not** in the 168 — they compile to nothing under a native `cargo test`
-(`#![cfg(target_arch = "wasm32")]`) and only run under `wasm-pack test
---headless --firefox`, against a live node; see "UI" above. The algebra tests
-are the point; they run randomized partitions and delivery orders. Keep them
-green. New state-shape features need a corresponding law test, not just a
-happy-path test.
+`cargo test --workspace --locked` — 190 tests: 109 in `adjourn-core` (24 algebra
+tests, 35 adversarial tests, and 50 delegate-policy tests), 17 contract tests,
+12 delegate adapter tests, 27 `adjourn-client` tests, and 25 `adjourn-ui` tests
+(3 `conn.rs` unit tests, 8 board, 14 routing — see "UI" above for what that
+number does and does not cover). Two more `adjourn-ui` tests exist in
+`ui/tests/browser.rs` and are **not** in the 189 — they compile to nothing
+under a native `cargo test` (`#![cfg(target_arch = "wasm32")]`) and only run
+under `wasm-pack test --headless --firefox`, against a live node; see "UI"
+above. The algebra tests are the point; they run randomized partitions and
+delivery orders. Keep them green. New state-shape features need a
+corresponding law test, not just a happy-path test.
 
 - `common/tests/algebra.rs` (24) — the monoid laws and the original
   adversarial cases.
@@ -933,42 +1143,68 @@ happy-path test.
   (retroactive move substitution, reviving an expired draw offer by rewinding),
   and the chess edges (promotion, underpromotion, castling notation, en
   passant, repetition, top-K eviction, `MAX_PLY`, and draw claims).
-- `common/tests/delegate_policy.rs` (40) — the delegate's pure decision
+- `common/tests/delegate_policy.rs` (49) — the delegate's pure decision
   functions: bind/sign refusals, entropy classification and mixing, the
-  ply-0 sentinel guard, and wire round-trips for `Request`/`Response`/
-  `GameRecord`/`GameSummary` through CBOR. Runs on any platform.
+  ply-0 sentinel guard, wire round-trips for `Request`/`Response`/
+  `GameRecord`/`GameSummary` through CBOR, and (added for contract-key
+  migration) `decide_rebind`'s refusals and its `last_signed_ply`/`origin`/
+  `params`/`game_id` preservation, plus format-2-migrates-not-refused and the
+  matching "does not decode with `last_signed_ply` defaulted" negative case.
+  Runs on any platform.
 - `contracts/adjourn-contract/tests/interface.rs` (17) — the adapter: byte
   encodings, empty-state cases, two peers converging in one round through the
   real interface, and that chess legality is NOT a validity condition.
-- `delegates/adjourn-delegate/tests/adapter.rs` (9) — CI-only. Two groups:
+- `delegates/adjourn-delegate/tests/adapter.rs` (12) — CI-only. Two groups:
   the secret-store key namespaces never collide (and a crafted label cannot
   forge another namespace's prefix), plus dispatch tests that drive
   `adjourn_delegate::handle` directly — a key created and listed, a label
-  hijack attempt from a different origin refused as `WrongOrigin`, and a
-  double-sign attempt refused through the real dispatch path, not just the
-  policy layer beneath it.
-- `client/` (21, across `src/lib.rs` unit tests 2, `tests/fake_node.rs` 2,
-  `tests/full_game.rs` 1, `tests/invite.rs` 4, `tests/moves.rs` 4,
-  `tests/setup.rs` 3, `tests/updates.rs` 3, `tests/view.rs` 2) —
-  `adjourn_client::session`'s flows run against `FakeNode` (real contract and
-  delegate code, in-memory transport): both players deriving the same
-  contract, a build mismatch refused loudly, a full scholar's-mate game end
-  to end, out-of-turn moves failing before signing, a double-sign attempt
-  refused by the delegate, (`updates.rs`) `watch_label` driven end to end
-  against `FakeNode`'s per-node subscription tracking asserting the
-  notification is a `Delta` and the watcher's callback reports the
-  opponent's move (see "Client" above), (`setup.rs`) each side of an invite
-  getting its own `FakeNode` `World` rather than sharing one — the structure
-  that lets the inviter's conditional GET actually hit the absent-contract
-  branch, which is what the missing-contract fix needed (see "UI" above) —
-  and (`view.rs`) `GameView`'s ordered move list. These flow tests moved here
-  from `cli/tests/` when the session logic was extracted into
-  `adjourn-client`; the CLI crate itself has no `tests/` directory at all —
-  which is also why `WsClient::get`'s wiring of the missing-contract
-  classifier is verified by reading only, not by a test. Several integration
-  tests read the compiled contract WASM off disk and skip themselves if it is
-  absent locally -- but panic instead if `CI` is set, so a skip can never
-  masquerade as a pass in CI (see `client/tests/common/mod.rs::contract_wasm`).
+  hijack attempt from a different origin refused as `WrongOrigin`, a
+  double-sign attempt refused through the real dispatch path (not just the
+  policy layer beneath it), and (added for migration, 3 tests)
+  `rebind_repoints_a_bound_game_through_the_real_dispatch`,
+  `rebind_refuses_a_label_that_was_never_bound`, and
+  `rebinding_a_label_under_a_different_origin_than_bound_it_is_refused` — the
+  same origin-hijack shape as the bind case, now covered for `Rebind` too.
+- `client/` (27, across `src/lib.rs` unit tests 2, `tests/fake_node.rs` 2,
+  `tests/full_game.rs` 1, `tests/invite.rs` 4, `tests/migrate.rs` 6,
+  `tests/moves.rs` 4, `tests/setup.rs` 3, `tests/updates.rs` 3,
+  `tests/view.rs` 2) — `adjourn_client::session`'s flows run against
+  `FakeNode` (real contract and delegate code, in-memory transport): both
+  players deriving the same contract, a build mismatch refused loudly, a full
+  scholar's-mate game end to end, out-of-turn moves failing before signing, a
+  double-sign attempt refused by the delegate, (`updates.rs`) `watch_label`
+  driven end to end against `FakeNode`'s per-node subscription tracking
+  asserting the notification is a `Delta` and the watcher's callback reports
+  the opponent's move (see "Client" above), (`setup.rs`) each side of an
+  invite getting its own `FakeNode` `World` rather than sharing one — the
+  structure that lets the inviter's conditional GET actually hit the
+  absent-contract branch, which is what the missing-contract fix needed (see
+  "UI" above) — (`view.rs`) `GameView`'s ordered move list, and
+  (`tests/migrate.rs`, new, 6 tests) `migrating_moves_a_game_to_the_new_contract_id`,
+  `migrating_twice_is_a_no_op_the_second_time`,
+  `a_failed_put_leaves_the_game_bound_to_the_old_contract` (pins the
+  PUT-before-`Rebind` ordering via `FakeNode`'s `fail_next_put` injection —
+  `put` and `delegate` otherwise both succeed unconditionally, so a
+  `migrate_label` that issued `Rebind` first would pass every other test
+  identically), `skew_is_a_set_difference_not_the_presence_of_opponent_records`,
+  and `watch_label_survives_skew_against_an_unmigrated_opponent` /
+  `watch_label_detects_skew_delivered_as_a_later_notification` for
+  `opponent_moved_on_previous`. These flow tests moved here from `cli/tests/`
+  when the session logic was extracted into `adjourn-client`; the CLI crate
+  itself has no `tests/` directory at all — which is also why `WsClient::get`'s
+  wiring of the missing-contract classifier is verified by reading only, not
+  by a test. Several integration tests read the compiled contract WASM off
+  disk and skip themselves if it is absent locally -- but panic instead if
+  `CI` is set, so a skip can never masquerade as a pass in CI (see
+  `client/tests/common/mod.rs::contract_wasm`).
+- `ui/src/conn.rs` unit tests (3, new) — the build-mismatch classifier
+  (`is_build_mismatch`) that lets the UI recognise `migrate_label`'s
+  refusal and offer the migrate button: a mismatch for this label is
+  recognised, a mismatch naming a *different* label is not this label's
+  problem, and an unrelated failure is never mistaken for a mismatch. See
+  "Known issues, unresolved" above — this classifier matches on a substring of
+  rendered error text, not typed data, which is a known follow-up rather than
+  something these tests can close.
 - `ui/tests/board.rs` (8) and `ui/tests/routing.rs` (14) — both run natively,
   not on wasm: the opening position and its mirror for Black, square
   selection and legal-move highlighting, promotion detection on both back
@@ -987,7 +1223,7 @@ happy-path test.
   timeout to save it). All of these are the transport's error decisions pulled
   out as pure functions precisely so they are testable off-wasm — the same
   move `route` itself was extracted for. `ui/tests/browser.rs` (2, wasm-only,
-  **not** counted in the 168) covers `connect`'s dead-port timeout and a live
+  **not** counted in the 189) covers `connect`'s dead-port timeout and a live
   `register_delegate`/`ListGames` round trip — see "UI" above for exactly what
   that file does and does not close, and why it is not wired into CI. What
   still has no automated coverage anywhere: the `setTimeout` that bounds a

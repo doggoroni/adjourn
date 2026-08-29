@@ -384,6 +384,15 @@ it must be loud rather than each player silently sitting on a separate
 contract. If it matches, Alice's node PUTs the contract too (if it hasn't
 already seen it) and binds.
 
+If a game was bound under an older `adjourn-contract` build and this node's
+build now derives a different id, both `game bind` above and every move-flow
+command on an already-bound game refuse with a pointer to
+`adjourn game migrate --label <label>` — see "Delegate" in `CLAUDE.md` for
+what that does (GET the old state, PUT it under the new id, `Rebind` the
+delegate's record) and why it is safe to run more than once. Not exercised
+against two live nodes in this runbook; verified against `FakeNode` in
+`client/tests/migrate.rs`.
+
 ### 4.5 Play Scholar's Mate
 
 Same alternation the CI test in `cli/tests/full_game.rs` drives against two
