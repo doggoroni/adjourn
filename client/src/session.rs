@@ -599,7 +599,50 @@ pub fn opponent_moved_on_previous(
         .any(|(id, rec)| rec.signer != *ours && !current.records.contains_key(id))
 }
 
-/// Follow a game, calling `on_status` with the projection after every update.
+/// GET `id`, decode it as a `GameState`, and -- unless `*reported` is already
+/// `true` -- call `on_skew` with [`SKEW_WARNING`] if `opponent_moved_on_previous`
+/// fires against `current`. Shared by `watch_label`'s pre-loop check
+/// (`subscribe = true`, establishing the subscription that lets a LATER wake
+/// reach the in-loop call below) and its in-loop check (`subscribe = false`,
+/// a plain re-GET once a wake names the previous id) so the two copies of
+/// this logic cannot drift apart.
+async fn check_previous_skew<N: NodeClient>(
+    node: &mut N,
+    id: [u8; 32],
+    subscribe: bool,
+    current: &GameState,
+    ours: &KeyBytes,
+    reported: &mut bool,
+    on_skew: &mut impl FnMut(&str),
+) -> anyhow::Result<()> {
+    if *reported {
+        return Ok(());
+    }
+    let bytes = node.get(ContractInstanceId::new(id), subscribe).await?;
+    if let Some(bytes) = bytes.as_deref() {
+        if let Some(previous_state) = decode_state_payload(bytes)? {
+            if opponent_moved_on_previous(current, &previous_state, ours) {
+                on_skew(SKEW_WARNING);
+                *reported = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Follow a game, calling `on_status` with the projection after every update,
+/// and `on_skew` with [`SKEW_WARNING`] if the opponent is ever found to have
+/// moved on a contract this game migrated away from (see
+/// `opponent_moved_on_previous`).
+///
+/// `on_skew` exists as its own callback, not folded into `on_status` or a bare
+/// `eprintln!`, so a caller can both TEST that the signal fired (a `FnMut`
+/// closure is inspectable; a `println!` is not) and DISPLAY it somewhere a
+/// user can actually see it -- including a browser, which has no stderr any
+/// user ever looks at. It is never treated as fatal: firing it does not end
+/// the loop, return an `Err`, or otherwise affect `on_status`'s own calls.
+/// The game is still fully readable and still being watched; this is a
+/// report, not a teardown.
 ///
 /// Merges each notification into the held state rather than replacing it: the
 /// payload may be a `State`, a `Delta`, or a `StateAndDelta`, and merge is what
@@ -611,6 +654,7 @@ pub async fn watch_label<N: NodeClient>(
     label: &str,
     contract_wasm: Vec<u8>,
     mut on_status: impl FnMut(&GameState, &Status),
+    mut on_skew: impl FnMut(&str),
 ) -> anyhow::Result<()> {
     let g = open_game(node, label, contract_wasm).await?;
     let mut state = g.view.state;
@@ -667,15 +711,16 @@ pub async fn watch_label<N: NodeClient>(
     let previous_id = g.view.previous;
     let mut reported_skew = false;
     if let Some(old) = previous_id {
-        let old_bytes = node.get(ContractInstanceId::new(old), true).await?;
-        if let Some(bytes) = old_bytes.as_deref() {
-            if let Some(previous_state) = decode_state_payload(bytes)? {
-                if opponent_moved_on_previous(&state, &previous_state, &ours) {
-                    eprintln!("{SKEW_WARNING}");
-                    reported_skew = true;
-                }
-            }
-        }
+        check_previous_skew(
+            node,
+            old,
+            true,
+            &state,
+            &ours,
+            &mut reported_skew,
+            &mut on_skew,
+        )
+        .await?;
     }
 
     loop {
@@ -696,14 +741,18 @@ pub async fn watch_label<N: NodeClient>(
             // here is possible. Re-GET it (its own notification payload is
             // not decoded; a one-shot GET is simple and this path is rare)
             // and check for skew, same as the immediate check above.
-            if !reported_skew && previous_id.is_some_and(|old| *id == old) {
-                if let Some(bytes) = node.get(id, false).await? {
-                    if let Some(previous_state) = decode_state_payload(&bytes)? {
-                        if opponent_moved_on_previous(&state, &previous_state, &ours) {
-                            eprintln!("{SKEW_WARNING}");
-                            reported_skew = true;
-                        }
-                    }
+            if let Some(old) = previous_id {
+                if *id == old {
+                    check_previous_skew(
+                        node,
+                        old,
+                        false,
+                        &state,
+                        &ours,
+                        &mut reported_skew,
+                        &mut on_skew,
+                    )
+                    .await?;
                 }
             }
             continue; // a different game on the same connection

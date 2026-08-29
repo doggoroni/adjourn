@@ -26,3 +26,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Pinned to match `ui/Cargo.toml`'s own pin, since both are test/UI-only uses
+# of the same crate. Dev-only: never enters the contract or delegate build,
+# so it cannot affect the contract key.
+futures = "=0.3.34"

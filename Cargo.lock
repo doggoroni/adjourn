@@ -29,6 +29,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "freenet-stdlib",
+ "futures",
  "serde",
  "serde_bytes",
  "shakmaty",

@@ -204,17 +204,25 @@ async fn watch_label_reports_the_opponents_move() {
     // actually guarantees the pair moves together today is `watch_label`
     // itself -- it projects `status` from the very `state` it passes, on
     // every call -- not this test.
-    watch_label(&mut bob, "bob", wasm, |state, status| {
-        for id in &status.chain {
-            assert!(
-                state.records.contains_key(id),
-                "chain id {id:?} at ply {} is missing from the state passed \
-                 alongside it -- the move history would silently drop it",
-                status.ply
-            );
-        }
-        seen.push(status.ply);
-    })
+    watch_label(
+        &mut bob,
+        "bob",
+        wasm,
+        |state, status| {
+            for id in &status.chain {
+                assert!(
+                    state.records.contains_key(id),
+                    "chain id {id:?} at ply {} is missing from the state passed \
+                     alongside it -- the move history would silently drop it",
+                    status.ply
+                );
+            }
+            seen.push(status.ply);
+        },
+        // This game never migrated, so `previous` is `None` and no skew
+        // check ever runs -- nothing here should ever fire.
+        |msg| panic!("unexpected skew signal on a game that never migrated: {msg}"),
+    )
     .await
     .expect("watch runs to the end of the log");
 

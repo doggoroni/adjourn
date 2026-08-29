@@ -97,6 +97,19 @@ pub struct Wires {
     /// it would let that clear silently erase the only evidence the watch
     /// died.
     pub watch_error: Signal<Option<String>>,
+    /// Set by the watch actor when `session::watch_label`'s `on_skew`
+    /// callback fires: the opponent has moved on a contract this game
+    /// migrated away from, and those moves are not reaching the contract
+    /// this build derives (see `session::opponent_moved_on_previous`).
+    /// Unlike `watch_error` this is NOT a transport failure -- the game is
+    /// still fully readable and the watch is still running, which is why it
+    /// is its own signal rather than reusing `watch_error` or `error`: a
+    /// caller has to be able to tell "the node connection died" from
+    /// "the connection is fine, but the other player is stuck on an old
+    /// build" and react to the two differently (the latter never forces a
+    /// reconnect). Cleared at the start of every fresh `Watch`, same as
+    /// `watch_error`.
+    pub skew: Signal<Option<String>>,
     pub busy: Signal<bool>,
     pub connected: Signal<bool>,
 }
@@ -116,6 +129,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
     let mut offer_blob = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
     let mut watch_error = use_signal(|| None::<String>);
+    let mut skew = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let mut connected = use_signal(|| false);
 
@@ -143,9 +157,11 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                 Cmd::Reconnect => {
                     client = None;
                     watch_error.set(None);
+                    skew.set(None);
                 }
                 Cmd::Watch { label } => {
                     watch_error.set(None);
+                    skew.set(None);
 
                     // `watch_label` does not return until the game is
                     // decided or the transport dies -- there is no timeout,
@@ -171,9 +187,13 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         // and it subscribes -- `open_game_view`'s GET does not,
                         // which is why a watcher needs its own command.
                         let mut view_sig = view;
+                        let mut skew_sig = skew;
                         let l = label.clone();
-                        let watch_fut =
-                            session::watch_label(c, &label, wasm, move |state, status| {
+                        let watch_fut = session::watch_label(
+                            c,
+                            &label,
+                            wasm,
+                            move |state, status| {
                                 view_sig.with_mut(|v| {
                                     if let Some(v) = v.as_mut() {
                                         if v.label == l {
@@ -191,8 +211,16 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                                         }
                                     }
                                 });
-                            })
-                            .fuse();
+                            },
+                            // Never fatal, never a teardown -- see the doc
+                            // comment on `Wires::skew`. Latched here rather
+                            // than appended to, matching `session.rs`'s own
+                            // `reported_skew` latch: the message is static
+                            // (`SKEW_WARNING`), so there is nothing to
+                            // accumulate.
+                            move |msg: &str| skew_sig.set(Some(msg.to_string())),
+                        )
+                        .fuse();
                         futures::pin_mut!(watch_fut);
                         let next = rx.next().fuse();
                         futures::pin_mut!(next);
@@ -441,6 +469,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
         offer_blob,
         error,
         watch_error,
+        skew,
         busy,
         connected,
     }
@@ -462,6 +491,7 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
     let offer_blob = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
     let watch_error = use_signal(|| None::<String>);
+    let skew = use_signal(|| None::<String>);
     let busy = use_signal(|| false);
     let connected = use_signal(|| false);
 
@@ -479,6 +509,7 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
         offer_blob,
         error,
         watch_error,
+        skew,
         busy,
         connected,
     }

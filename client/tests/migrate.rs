@@ -3,12 +3,15 @@ mod common;
 use adjourn_client::fake::{shared_world, FakeNode};
 use adjourn_client::node::NodeClient;
 use adjourn_client::session::{
-    game_bind, invite_accept, invite_new, migrate_label, open_game_view,
+    draw_offer, game_bind, invite_accept, invite_new, migrate_label, open_game_view,
     opponent_moved_on_previous, play_move, watch_label, MigrateOutcome,
 };
 use adjourn_core::delegate_api::{Request, Response, Side};
 use adjourn_core::{Body, GameState, KeyBytes, Record};
 use ed25519_dalek::SigningKey;
+use freenet_stdlib::prelude::ContractInstanceId;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// The old contract legitimately holds the whole pre-migration history, so
 /// "the opponent has records there" is ALWAYS true and is not the signal. The
@@ -218,12 +221,17 @@ async fn migrating_twice_is_a_no_op_the_second_time() {
 
 /// Bob migrates; alice never does and keeps playing on the OLD contract.
 /// `watch_label` must still run to completion (not panic, not hang, not
-/// error) and must not stop reflecting bob's own (new-contract) game just
-/// because the opponent is stuck behind -- the game stays watchable, and the
-/// skew is reported (via `eprintln!`, not observable from here) rather than
-/// torn down. This test cannot see the printed warning; it pins the
-/// behaviour around it: the watch survives the skew and still reports the
-/// correct position on the contract bob actually migrated to.
+/// error), must not stop reflecting bob's own (new-contract) game just
+/// because the opponent is stuck behind, and must report the skew through
+/// `on_skew` exactly once -- the game stays watchable; this is a report, not
+/// a teardown.
+///
+/// This exercises the PRE-LOOP check: alice's stray move already exists by
+/// the time `watch_label` is called (ordinary, single-threaded test
+/// ordering), so the one-shot check `watch_label` runs before entering its
+/// loop is what catches it here. See
+/// `watch_label_detects_skew_delivered_as_a_later_notification` below for the
+/// IN-LOOP check, which needs a very different construction.
 #[tokio::test]
 async fn watch_label_survives_skew_against_an_unmigrated_opponent() {
     let Some((mut alice, mut bob, wasm)) = setup().await else {
@@ -255,9 +263,16 @@ async fn watch_label_survives_skew_against_an_unmigrated_opponent() {
         .unwrap();
 
     let mut seen = Vec::new();
-    watch_label(&mut bob, "bob", variant.clone(), |_state, status| {
-        seen.push(status.ply);
-    })
+    let mut skew_messages = Vec::new();
+    watch_label(
+        &mut bob,
+        "bob",
+        variant.clone(),
+        |_state, status| {
+            seen.push(status.ply);
+        },
+        |msg: &str| skew_messages.push(msg.to_string()),
+    )
     .await
     .expect("a lagging opponent must not turn watch_label into an error");
 
@@ -266,11 +281,142 @@ async fn watch_label_survives_skew_against_an_unmigrated_opponent() {
         vec![2],
         "bob's own contract only ever saw the first two moves"
     );
+    assert_eq!(
+        skew_messages.len(),
+        1,
+        "the skew must be reported exactly once, got {skew_messages:?}"
+    );
 
     // The game is still fully readable afterward -- skew is a report, not a
     // teardown.
     let after = open_game_view(&mut bob, "bob", variant).await.unwrap();
     assert_eq!(after.status.ply, 2);
+}
+
+/// Exercises the IN-LOOP skew check specifically -- the branch in
+/// `watch_label` that fires when a wake names the OLD contract, as opposed to
+/// the one-shot check `watch_label` runs before it ever enters its loop.
+///
+/// This is deliberately NOT constructed the same way as the test above.
+/// `FakeNode` never actually suspends -- none of its methods ever return
+/// `Poll::Pending` -- so there is no way to interleave a second, independent
+/// task's writes with an in-flight `watch_label` call using ordinary
+/// concurrency: a task sharing this single-threaded executor is never
+/// scheduled until `watch_label`'s own poll call yields control, and it never
+/// does until it returns. Writing alice's stray move BEFORE calling
+/// `watch_label` (as the test above does) is therefore always caught by the
+/// PRE-LOOP check -- there is no ordinary way to make it land only late
+/// enough for the in-loop check to be the one that finds it.
+///
+/// The way out: inject alice's move from INSIDE the `on_status` callback,
+/// which `watch_label` calls synchronously partway through its own loop --
+/// strictly after the pre-loop check has already run and found nothing.
+/// `futures::executor::block_on` runs her `play_move` call to completion
+/// there; it never actually blocks because `FakeNode` never returns Pending,
+/// so this is deterministic, not a race. This makes the ordering exact
+/// without needing real concurrency: alice's move enters `FakeNode`'s shared
+/// `World` only once `watch_label`'s loop is already running, at a point
+/// the pre-loop check can no longer reach.
+#[tokio::test]
+async fn watch_label_detects_skew_delivered_as_a_later_notification() {
+    let Some((mut alice, mut bob, wasm)) = setup().await else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+    let mut variant = wasm.clone();
+    variant.push(0);
+    variant.push(0);
+    variant.extend_from_slice(b"variant");
+
+    play_move(&mut alice, "alice", "e2e4", wasm.clone())
+        .await
+        .unwrap();
+    play_move(&mut bob, "bob", "e7e5", wasm.clone())
+        .await
+        .unwrap();
+
+    let outcome = migrate_label(&mut bob, "bob", variant.clone())
+        .await
+        .unwrap();
+    let MigrateOutcome::Migrated { to, .. } = outcome else {
+        panic!("expected Migrated, got {outcome:?}");
+    };
+
+    // Pre-subscribe bob to the CURRENT contract only, exactly like
+    // `updates.rs::watch_label_reports_the_opponents_move` does -- `FakeNode`
+    // only redelivers log entries landing at or after a subscribe point, and
+    // this needs one before the draw offer below or it would never be
+    // redelivered as a notification at all.
+    //
+    // Deliberately NOT also pre-subscribing to `old` here: doing so would let
+    // this test pass even if `watch_label`'s OWN subscribing call on `old`
+    // (`check_previous_skew`'s pre-loop call, `subscribe = true`) were
+    // deleted or changed to `subscribe = false` -- `FakeNode`'s subscription
+    // map is `or_insert`, so an earlier, test-driven subscribe would silently
+    // absorb that mutation and this test would keep passing for the wrong
+    // reason. Leaving `old` unsubscribed until `watch_label` itself
+    // subscribes is what makes the mutation in the report below actually be
+    // caught here.
+    bob.get(ContractInstanceId::new(to), true).await.unwrap();
+
+    // A record on bob's OWN (current, migrated-to) contract, so the watch
+    // loop has something to process before it ever wakes for the old
+    // contract. `draw_offer` has no turn check -- `Body::DrawOffer` signs
+    // unconditionally in `decide_sign`, unlike `Body::Move` -- so this does
+    // not depend on whose move it legitimately is, and it does not end the
+    // game the way `resign` would (which would return from `watch_label`
+    // before it ever looked at a second notification).
+    draw_offer(&mut bob, "bob", variant.clone()).await.unwrap();
+
+    let status_calls = Rc::new(RefCell::new(0usize));
+    let skew_after = Rc::new(RefCell::new(None::<usize>));
+    let mut injected = false;
+
+    {
+        let status_calls_for_status = status_calls.clone();
+        let status_calls_for_skew = status_calls.clone();
+        let skew_after_for_skew = skew_after.clone();
+
+        watch_label(
+            &mut bob,
+            "bob",
+            variant,
+            move |_state, _status| {
+                *status_calls_for_status.borrow_mut() += 1;
+                let n = *status_calls_for_status.borrow();
+                // Call 1 is `watch_label`'s own opening projection, before it
+                // has subscribed to anything -- injecting there would still
+                // land ahead of the pre-loop check and prove nothing new.
+                // Call 2 is the draw-offer notification processed inside the
+                // loop; injecting here happens strictly after the pre-loop
+                // check already ran (and found nothing).
+                if n == 2 && !injected {
+                    injected = true;
+                    futures::executor::block_on(play_move(
+                        &mut alice,
+                        "alice",
+                        "g1f3",
+                        wasm.clone(),
+                    ))
+                    .expect("alice can still play on the old contract");
+                }
+            },
+            move |_msg: &str| {
+                let n = *status_calls_for_skew.borrow();
+                skew_after_for_skew.borrow_mut().get_or_insert(n);
+            },
+        )
+        .await
+        .expect("a lagging opponent must not turn watch_label into an error");
+    }
+
+    assert_eq!(
+        *skew_after.borrow(),
+        Some(2),
+        "the skew must be reported only after the loop processed a real \
+         notification (status call 2), proving the IN-LOOP check fired -- \
+         the one-shot pre-loop check would show Some(1) or never fire at all, \
+         since alice had not moved a third time when it ran"
+    );
 }
 
 const ALICE_ENTROPY: [u8; 32] = [0xa1; 32];
