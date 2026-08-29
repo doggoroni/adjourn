@@ -12,6 +12,15 @@
 
 ## Global Constraints
 
+> **SUPERSEDED, read this first.** The constraint below asserts the contract
+> hash must remain `875ac4d2…`. That turned out to be false: adding ANY new
+> `Request` variant rotates it, and this branch accepted the rotation
+> deliberately. The current key is
+> `15beda67aa32da2e3274d57ab190114ccf3b73785be980776333d6822691e506`. See
+> `CLAUDE.md`, "Reproducible builds", for the measurement and the reasoning.
+> What still holds is determinism: two builds of one source must agree.
+
+
 - **Do not change the contract's reachable graph.** The contract imports only `adjourn_core::state::{Delta, Summary}` and `adjourn_core::{GameParams, GameState}`. Changes confined to `delegate_policy.rs` / `delegate_api.rs` are stripped and leave the contract byte-identical (verified: `875ac4d2619179339c7bd853d00154fc06f29844c793c2626e27bcbef1c69c2c`, 267,003 bytes). **Anything touching `GameParams`, `GameState`, `Record`, `Delta` or `Summary` rotates the contract key and is forbidden here.**
 - **Verify the contract hash is unchanged** at the end of any task that edits `common/`: run `./scripts/build-contract.sh` and confirm the sha256 above.
 - **Never run `cargo build --release` on the contract or delegate** — use `scripts/build-contract.sh` / `scripts/build-delegate.sh`.
