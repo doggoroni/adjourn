@@ -11,6 +11,67 @@ use adjourn_client::session::GameView;
 use adjourn_core::delegate_api::{GameSummary, Side};
 use dioxus::prelude::*;
 
+/// Classifies a failed `Cmd::Open`/`Cmd::Migrate` refresh as the specific
+/// "this build derives a different contract id than the delegate recorded"
+/// failure `expected_container` raises in `client/src/session.rs`.
+///
+/// HAZARD: there is no typed error for this the way `is_missing_contract`
+/// (`client/src/node.rs`) classifies on `ErrorKind` -- that function's own
+/// doc comment says to match the typed kind "never on the rendered message",
+/// and this function breaks that rule because there is no typed alternative
+/// here: `expected_container` raises a plain `anyhow::bail!`, not a
+/// `ClientError`. This matches its prose by substring -- the same rendering
+/// (`{err:#}`) the failure ends up shown as in `wires.error` -- so if that
+/// message's wording ever changes, this silently stops firing and the
+/// migrate button disappears with no compile error. Classified exactly once,
+/// here, where the error is produced -- never re-derived in a view: a view
+/// re-deriving it from `wires.error` free text was Task 6's original defect.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn is_build_mismatch(err: &anyhow::Error, label: &str) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("build mismatch") && msg.contains(&format!("--label {label}"))
+}
+
+// Pure and target-independent, like `route`/`is_missing_contract` elsewhere
+// in this workspace -- pulled out from under `use_conn`'s wasm32 gate
+// precisely so this classification is testable off-wasm rather than only
+// compile-checked. Runs natively; `cargo check --all-targets` on the host is
+// what would otherwise flag this as dead code, since `use_conn`'s only
+// callers of it live behind `#[cfg(target_arch = "wasm32")]`.
+#[cfg(test)]
+mod tests {
+    use super::is_build_mismatch;
+
+    fn mismatch_error(label: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "build mismatch: this build derives contract abc from the bound \
+             params, but the delegate recorded xyz. Rebuild with the same \
+             adjourn-contract version used when this game was bound, or run \
+             `adjourn game migrate --label {label}` to move this game onto \
+             the contract this build derives."
+        )
+    }
+
+    #[test]
+    fn a_build_mismatch_for_this_label_is_recognised() {
+        assert!(is_build_mismatch(&mismatch_error("alice"), "alice"));
+    }
+
+    #[test]
+    fn a_build_mismatch_for_a_different_label_is_not_this_labels_problem() {
+        // Two bound games under one delegate can be affected independently;
+        // one game's refusal must not paint another game's screen with a
+        // migrate button it has no reason to show.
+        assert!(!is_build_mismatch(&mismatch_error("bob"), "alice"));
+    }
+
+    #[test]
+    fn an_unrelated_failure_is_not_a_build_mismatch() {
+        let err = anyhow::anyhow!("delegate refused Sign: NotYourTurn");
+        assert!(!is_build_mismatch(&err, "alice"));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     Connect,
@@ -35,8 +96,8 @@ pub enum Cmd {
         offer: String,
     },
     /// Move a bound game onto the contract id this build derives. Sent from
-    /// the game screen when `wires.error` reports a build mismatch for this
-    /// label -- see `session::migrate_label`.
+    /// the game screen when `wires.mismatch` names this label -- see
+    /// `session::migrate_label` and `is_build_mismatch`.
     Migrate {
         label: String,
     },
@@ -116,6 +177,20 @@ pub struct Wires {
     /// reconnect). Cleared at the start of every fresh `Watch`, same as
     /// `watch_error`.
     pub skew: Signal<Option<String>>,
+    /// The label of a bound game this build cannot open because it derives a
+    /// different contract id than the delegate recorded (`session::open_game`
+    /// via `expected_container`) -- see [`is_build_mismatch`]. Set only by
+    /// `Cmd::Open`'s and `Cmd::Migrate`'s arms in the main actor, classifying
+    /// the failure once where it is produced. Cleared the way `skew` is
+    /// cleared -- on `Reconnect`, and when the affected label's own refresh
+    /// next succeeds -- deliberately NOT on every command the way `error` is:
+    /// `error` is wiped at the top of every command including `Watch`, and
+    /// `Watch` is queued right behind `Open` on every normal navigation into
+    /// `GameScreen` (`views/list.rs` sends `Open`, the screen's mount effect
+    /// sends `Watch`), so a signal cleared like `error` would already be gone
+    /// by the time `GameScreen` renders -- exactly the bug this field exists
+    /// to fix.
+    pub mismatch: Signal<Option<String>>,
     pub busy: Signal<bool>,
     pub connected: Signal<bool>,
 }
@@ -136,6 +211,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
     let mut error = use_signal(|| None::<String>);
     let mut watch_error = use_signal(|| None::<String>);
     let mut skew = use_signal(|| None::<String>);
+    let mut mismatch = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let mut connected = use_signal(|| false);
 
@@ -325,6 +401,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                 client = None;
                 connected.set(false);
                 error.set(None);
+                mismatch.set(None);
                 // The watch coroutine holds its own client to the same node
                 // URL and must not keep talking to the old one -- forward the
                 // teardown so it cancels any in-flight watch and drops its
@@ -403,7 +480,26 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                     }
                     Cmd::Migrate { label } => {
                         session::migrate_label(c, &label, wasm.clone()).await?;
-                        view.set(Some(session::open_game_view(c, &label, wasm).await?));
+                        // Re-run through the same success/failure
+                        // classification as `Open` below: a migration that
+                        // succeeded but whose immediate refresh still can't
+                        // open (it shouldn't, but nothing enforces that at
+                        // this call site) must not leave a stale `mismatch`
+                        // label pointing at a game that no longer needs the
+                        // button, nor silently drop a fresh one.
+                        let result = session::open_game_view(c, &label, wasm).await;
+                        match &result {
+                            Ok(_) => {
+                                if mismatch.read().as_deref() == Some(label.as_str()) {
+                                    mismatch.set(None);
+                                }
+                            }
+                            Err(e) if is_build_mismatch(e, &label) => {
+                                mismatch.set(Some(label.clone()));
+                            }
+                            Err(_) => {}
+                        }
+                        view.set(Some(result?));
                     }
                     Cmd::Open { label } => {
                         // Clear the shared view before awaiting the open, not
@@ -414,7 +510,29 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                         // that case showing "loading" forever rather than
                         // the honest stale-cleared state.
                         view.set(None);
-                        view.set(Some(session::open_game_view(c, &label, wasm).await?));
+                        let result = session::open_game_view(c, &label, wasm).await;
+                        // Classify success/failure into `mismatch` here, once
+                        // -- see `is_build_mismatch` and `Wires::mismatch`'s
+                        // doc comment for why this cannot be `error.set(None)`
+                        // at the top of the loop the way every other signal
+                        // here is reset: `Cmd::Watch` is queued right behind
+                        // this `Cmd::Open` on every normal navigation into
+                        // `GameScreen` (see `views/list.rs` and
+                        // `views/game.rs`'s mount effect), and `Watch` does
+                        // NOT touch `mismatch`, so a value set here survives
+                        // it -- which is the entire point.
+                        match &result {
+                            Ok(_) => {
+                                if mismatch.read().as_deref() == Some(label.as_str()) {
+                                    mismatch.set(None);
+                                }
+                            }
+                            Err(e) if is_build_mismatch(e, &label) => {
+                                mismatch.set(Some(label.clone()));
+                            }
+                            Err(_) => {}
+                        }
+                        view.set(Some(result?));
                     }
                     Cmd::Play { label, uci } => {
                         session::play_move(c, &label, &uci, wasm.clone()).await?;
@@ -480,6 +598,7 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
         error,
         watch_error,
         skew,
+        mismatch,
         busy,
         connected,
     }
@@ -502,6 +621,7 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
     let mut error = use_signal(|| None::<String>);
     let watch_error = use_signal(|| None::<String>);
     let skew = use_signal(|| None::<String>);
+    let mismatch = use_signal(|| None::<String>);
     let busy = use_signal(|| false);
     let connected = use_signal(|| false);
 
@@ -520,6 +640,7 @@ pub fn use_conn(_node_url: Signal<String>) -> Wires {
         error,
         watch_error,
         skew,
+        mismatch,
         busy,
         connected,
     }

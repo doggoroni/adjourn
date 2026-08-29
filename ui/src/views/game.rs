@@ -37,15 +37,19 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
     // `session::open_game`'s `expected_container` refuses to even GET when
     // this build derives a different contract id than the delegate recorded
     // for this label -- see `CLAUDE.md`'s "Client" section and
-    // `expected_container`'s doc comment. That refusal lands in `wires.error`
-    // as a message naming this exact label (it spells out the very
-    // `adjourn game migrate --label <label>` command this button sends), so
-    // matching on that text -- rather than showing the button unconditionally
-    // -- is what keeps it hidden for every game that is not actually affected.
-    let build_mismatch =
-        wires.error.read().as_ref().is_some_and(|e| {
-            e.contains("build mismatch") && e.contains(&format!("--label {label}"))
-        });
+    // `expected_container`'s doc comment. `conn.rs`'s `Cmd::Open`/`Cmd::Migrate`
+    // arms classify that failure once, where it is produced, into
+    // `wires.mismatch` (see `is_build_mismatch` and `Wires::mismatch`'s doc
+    // comment there) -- this view only reads the already-classified signal.
+    // It must NOT re-derive the classification from `wires.error`'s free
+    // text: `error` is cleared at the top of every command the main actor
+    // runs, including `Watch`, and `Watch` is queued right behind `Open` on
+    // every normal navigation into this screen (`views/list.rs` sends
+    // `Open`, the mount effect above sends `Watch`) -- so a check against
+    // `wires.error` here would read `None` by the time this screen renders,
+    // and the check below at `view.is_none()` would then show "loading…"
+    // forever instead of this button.
+    let build_mismatch = wires.mismatch.read().as_deref() == Some(label.as_str());
     if build_mismatch {
         return rsx! {
             section { class: "screen",
