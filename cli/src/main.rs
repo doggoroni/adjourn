@@ -418,7 +418,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 |_state, status| {
                     output::render_status(&label, status);
                 },
-                |msg| eprintln!("warning: {msg}"),
+                // `on_skew` carries both directions: SKEW_WARNING when the
+                // opponent is stranded on the previous contract, and
+                // SKEW_RESOLVED once their records reach this one again.
+                // Labelling the recovery "warning:" would be the same species
+                // of dishonest output this file's error handling exists to
+                // avoid -- a message whose label contradicts its content.
+                |msg| {
+                    if msg == session::SKEW_RESOLVED {
+                        eprintln!("{msg}");
+                    } else {
+                        eprintln!("warning: {msg}");
+                    }
+                },
             )
             .await?;
         }
