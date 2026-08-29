@@ -388,6 +388,44 @@ pure function of the result set.
   should not: the players are the only ones who can decide which build to
   standardise on.
 
+- **Two migrations by the same player erase detection of the first hop.**
+  `GameRecord.previous` is one slot (`common/src/delegate_policy.rs`), not a
+  history: migrating A→B sets `previous = A`; a later B→C **overwrites** it to
+  `previous = B`, not appends to it. If the opponent never followed past A,
+  their moves keep landing on A, which is now neither `previous` nor the
+  current contract — absent from both sides of the `C` vs `B` set difference
+  `opponent_moved_on_previous` computes. No skew is reported, the game stalls,
+  and the detector reports a healthy game. `previous` is therefore accurately
+  described as *overwritten*, not "never cleared" — the earlier wording in
+  this file implied the old value survives; it does not.
+
+  Not fixed here: the fix is a bounded chain (`previous: Vec<[u8; 32]>`, capped
+  the same way `MAX_PLY` bounds move records) so `opponent_moved_on_previous`
+  can check every prior id, not just the immediate one. That is a
+  `GAME_RECORD_FORMAT` bump touching the delegate, the client, and the UI, not
+  a fix to land inside a final pass. Extracting `delegate_policy`/`delegate_api`
+  into their own crate (the bullet above) would also reduce how often a
+  two-hop migration comes up in practice, by making a delegate-only change
+  less likely to force a contract-key rotation that prompts a second
+  `adjourn game migrate` in the first place — it does not eliminate the
+  two-hop case, only makes it rarer.
+
+- **A PUT-succeeded-but-Rebind-failed migration cannot recover once the old
+  contract is evicted.** `migrate_label` (`client/src/session.rs`) sequences
+  the state PUT to the new contract id before the delegate `Rebind` precisely
+  so a failure partway through is retryable (see "Delegate" above) — normally
+  a retry re-GETs the old id, which still holds the state, and completes the
+  `Rebind`. But if the node evicts the old, now-cold contract between the PUT
+  and a retried `Rebind`, that re-GET returns `Ok(None)` and `migrate_label`
+  errors, even though the state the migration was moving already sits, intact,
+  at the new id — only the delegate record needs repointing, and nothing
+  needs to be re-read from the contract that is gone. Not fixed here: the
+  narrow fix is letting `migrate_label` fall back to reading the state it
+  already has locally (or skip the re-GET and issue `Rebind` directly) when
+  the old id is confirmed to be the source of a prior successful PUT, but that
+  needs a way to distinguish "haven't PUT yet" from "PUT succeeded, old
+  evicted" that the current flow does not track.
+
 - **The UI's build-mismatch detector classifies on a substring of an error's
   rendered prose, not on typed data.** `expected_container`
   (`client/src/session.rs`) reports a build mismatch through a plain
@@ -736,15 +774,26 @@ machine-specific paths and produces a different, unshippable key.
   opponent records there proves nothing; the signal is opponent-signed records
   present on the *old* id and absent from the *new* one — proof the opponent
   moved after this player migrated and has not followed. The check is
-  stateless (no stored migration ply to drift out of sync with reality) and
-  symmetric (it fires the same way to show the opponent has migrated and this
-  player hasn't). `previous` is never cleared once set — clearing it would
-  need a second delegate mutation to save one subscription on a game that
-  `watch` already stops polling once it is decided, so the saving does not pay
-  for the added mutation.
+  stateless (no stored migration ply to drift out of sync with reality) and is
+  edge-triggered rather than fire-once: `session::watch_label` reports
+  [`SKEW_WARNING`] on entering skew and [`SKEW_RESOLVED`] once the opponent's
+  records catch back up onto the current contract, so a UI banner does not
+  outlive the split it describes.
 
-  See "Known issues, unresolved" below for the gap this creates when only one
-  player migrates.
+  **Detection is one-sided, not symmetric — this corrects an earlier version
+  of this paragraph that claimed otherwise.** `previous` is set only by
+  `decide_rebind`, i.e. only on the delegate record of the player who ran
+  `migrate`. Only that player's `watch_label` ever calls
+  `check_previous_skew`/`opponent_moved_on_previous` at all — the opponent's
+  `GameRecord.previous` stays `None`, so their `watch_label` never subscribes
+  to a second id and never checks anything. If the migrating player's moves
+  stop reaching the opponent (rather than the other way around), the opponent
+  gets no check, no warning, and no error: their game simply stops advancing,
+  indistinguishable from an idle correspondence game. Only the player who
+  migrated can ever learn that the two sides have split.
+
+  `previous` is also never *cleared*, but is **overwritten**, not preserved,
+  by a second migration — see "Known issues, unresolved" below for both gaps.
 
 ## UI
 
@@ -1075,8 +1124,8 @@ omission.
 
 ## Testing
 
-`cargo test --workspace --locked` — 189 tests: 108 in `adjourn-core` (24 algebra
-tests, 35 adversarial tests, and 49 delegate-policy tests), 17 contract tests,
+`cargo test --workspace --locked` — 190 tests: 109 in `adjourn-core` (24 algebra
+tests, 35 adversarial tests, and 50 delegate-policy tests), 17 contract tests,
 12 delegate adapter tests, 27 `adjourn-client` tests, and 25 `adjourn-ui` tests
 (3 `conn.rs` unit tests, 8 board, 14 routing — see "UI" above for what that
 number does and does not cover). Two more `adjourn-ui` tests exist in

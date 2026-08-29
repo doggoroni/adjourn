@@ -138,7 +138,16 @@ pub struct GameSummary {
     /// The contract this game was bound to before a migration, if any. A
     /// client watches it alongside the current one so an opponent still on the
     /// old generation is visible rather than looking like a stalled game.
-    #[serde(with = "serde_bytes")]
+    ///
+    /// `#[serde(default)]` for the same reason as `GameRecord.previous`
+    /// (`delegate_policy.rs`), but crossing the version boundary the OTHER
+    /// direction: a client built from this branch talking to a node whose
+    /// delegate generation predates this field would otherwise hit a missing
+    /// required field on every `ListGames` response and fail every command
+    /// that reads `bound_game` with an opaque decode error, not just the ones
+    /// touching migration. Defaulting an id to `None` loses no safety
+    /// property here either.
+    #[serde(with = "serde_bytes", default)]
     pub previous: Option<[u8; 32]>,
 }
 

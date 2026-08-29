@@ -572,7 +572,7 @@ fn decode_delta_payload(bytes: &[u8]) -> anyhow::Result<Option<Delta>> {
 }
 
 /// Printed once by `watch_label` when `opponent_moved_on_previous` fires.
-const SKEW_WARNING: &str = "your opponent is still on the previous contract version -- your \
+pub const SKEW_WARNING: &str = "your opponent is still on the previous contract version -- your \
      moves are not reaching them. Both players must run the same adjourn-contract build.";
 
 /// Has the opponent moved on the contract we migrated AWAY from?
@@ -599,41 +599,94 @@ pub fn opponent_moved_on_previous(
         .any(|(id, rec)| rec.signer != *ours && !current.records.contains_key(id))
 }
 
-/// GET `id`, decode it as a `GameState`, and -- unless `*reported` is already
-/// `true` -- call `on_skew` with [`SKEW_WARNING`] if `opponent_moved_on_previous`
-/// fires against `current`. Shared by `watch_label`'s pre-loop check
-/// (`subscribe = true`, establishing the subscription that lets a LATER wake
-/// reach the in-loop call below) and its in-loop check (`subscribe = false`,
-/// a plain re-GET once a wake names the previous id) so the two copies of
-/// this logic cannot drift apart.
-async fn check_previous_skew<N: NodeClient>(
+/// Printed by `watch_label`'s recompute when the opponent's records converge
+/// back onto the current contract after a period of reported skew -- the
+/// counterpart to [`SKEW_WARNING`]. Sent through the same `on_skew` callback
+/// a caller already has, distinguished only by content: neither message
+/// means "stop watching", both are reports over a game that stays fully
+/// readable throughout.
+pub const SKEW_RESOLVED: &str = "the opponent's moves are reaching this contract again -- the \
+     earlier skew warning no longer applies.";
+
+/// GET `id`, decode it as a `GameState`, and cache the result into
+/// `*previous_state` for [`recompute_skew`] to compare against. Shared by
+/// `watch_label`'s pre-loop check (`subscribe = true`, establishing the
+/// subscription that lets a LATER wake reach the in-loop call below) and its
+/// in-loop check (`subscribe = false`, a plain re-GET once a wake names the
+/// previous id) so the two copies of this logic cannot drift apart.
+///
+/// Deliberately infallible: a GET timeout against a previous contract that
+/// has gone cold, or an undecodable state there, must never propagate out of
+/// `watch_label` and tear down a healthy watch on the CURRENT contract --
+/// this check is a diagnostic on a game the caller has already left, not a
+/// condition of the game being watched. Either failure sets `*unreachable` so
+/// this id is not retried on every subsequent wake; a permanently
+/// unreachable previous contract degrades to "no further skew checks, keep
+/// whatever was last cached", never to an error.
+async fn refresh_previous_state<N: NodeClient>(
     node: &mut N,
     id: [u8; 32],
     subscribe: bool,
-    current: &GameState,
-    ours: &KeyBytes,
-    reported: &mut bool,
-    on_skew: &mut impl FnMut(&str),
-) -> anyhow::Result<()> {
-    if *reported {
-        return Ok(());
+    previous_state: &mut Option<GameState>,
+    unreachable: &mut bool,
+) {
+    if *unreachable {
+        return;
     }
-    let bytes = node.get(ContractInstanceId::new(id), subscribe).await?;
+    let bytes = match node.get(ContractInstanceId::new(id), subscribe).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            *unreachable = true;
+            return;
+        }
+    };
     if let Some(bytes) = bytes.as_deref() {
-        if let Some(previous_state) = decode_state_payload(bytes)? {
-            if opponent_moved_on_previous(current, &previous_state, ours) {
-                on_skew(SKEW_WARNING);
-                *reported = true;
-            }
+        match decode_state_payload(bytes) {
+            Ok(Some(state)) => *previous_state = Some(state),
+            Ok(None) => {}
+            Err(_) => *unreachable = true,
         }
     }
-    Ok(())
+}
+
+/// Compare `current` against a possibly-stale cached `previous`, and call
+/// `on_skew` only on a TRANSITION of `*skewed` -- entering skew fires
+/// [`SKEW_WARNING`] once, leaving it fires [`SKEW_RESOLVED`] once, and no
+/// call at all while the answer has not changed since the last check. This is
+/// what lets a caller's banner clear once the game genuinely recovers (the
+/// opponent's records catch up onto the current contract), rather than
+/// latching the warning forever once it has fired a single time.
+///
+/// Takes `previous` as `Option` rather than requiring a fresh GET: the
+/// current-contract loop calls this after every merge, using whatever was
+/// last cached by `refresh_previous_state`, with no extra network round trip
+/// -- resolution is detected because `current` moved, not because the
+/// previous contract was re-fetched.
+fn recompute_skew(
+    current: &GameState,
+    previous: Option<&GameState>,
+    ours: &KeyBytes,
+    skewed: &mut bool,
+    on_skew: &mut impl FnMut(&str),
+) {
+    let Some(previous) = previous else {
+        return;
+    };
+    let now = opponent_moved_on_previous(current, previous, ours);
+    if now != *skewed {
+        on_skew(if now { SKEW_WARNING } else { SKEW_RESOLVED });
+        *skewed = now;
+    }
 }
 
 /// Follow a game, calling `on_status` with the projection after every update,
 /// and `on_skew` with [`SKEW_WARNING`] if the opponent is ever found to have
 /// moved on a contract this game migrated away from (see
-/// `opponent_moved_on_previous`).
+/// `opponent_moved_on_previous`), and again with [`SKEW_RESOLVED`] if the
+/// opponent's records are later found to have caught up onto the current
+/// contract. Both are edge-triggered: each fires once per transition, not
+/// once per wake, so a caller does not see the same message repeated on
+/// every notification while the underlying answer is unchanged.
 ///
 /// `on_skew` exists as its own callback, not folded into `on_status` or a bare
 /// `eprintln!`, so a caller can both TEST that the signal fired (a `FnMut`
@@ -642,7 +695,8 @@ async fn check_previous_skew<N: NodeClient>(
 /// user ever looks at. It is never treated as fatal: firing it does not end
 /// the loop, return an `Err`, or otherwise affect `on_status`'s own calls.
 /// The game is still fully readable and still being watched; this is a
-/// report, not a teardown.
+/// report, not a teardown. Checking for skew is itself infallible for the
+/// same reason -- see `refresh_previous_state`'s doc comment.
 ///
 /// Merges each notification into the held state rather than replacing it: the
 /// payload may be a `State`, a `Delta`, or a `StateAndDelta`, and merge is what
@@ -704,23 +758,34 @@ pub async fn watch_label<N: NodeClient>(
     // may not have followed -- their moves would land on the OLD id and
     // never reach this one. Subscribe there too, so this loop wakes on that
     // as well as on the current contract, and check once immediately for
-    // skew that predates this call. `reported_skew` latches so a lingering
-    // skew is surfaced once rather than on every subsequent wake -- the game
-    // stays watchable either way; this is a report, not a teardown.
+    // skew that predates this call. `skewed` tracks the CURRENT answer, not
+    // "has this ever fired" -- `recompute_skew` only calls `on_skew` on a
+    // transition, so a lingering skew is surfaced once rather than on every
+    // subsequent wake, but a later recovery (the opponent's records catch up
+    // onto the current contract) fires `SKEW_RESOLVED` and clears it. The
+    // game stays watchable throughout either way; this is a report, not a
+    // teardown.
     let ours = g.view.params.key_of(g.view.side.into());
     let previous_id = g.view.previous;
-    let mut reported_skew = false;
+    let mut previous_state: Option<GameState> = None;
+    let mut previous_unreachable = false;
+    let mut skewed = false;
     if let Some(old) = previous_id {
-        check_previous_skew(
+        refresh_previous_state(
             node,
             old,
             true,
-            &state,
-            &ours,
-            &mut reported_skew,
-            &mut on_skew,
+            &mut previous_state,
+            &mut previous_unreachable,
         )
-        .await?;
+        .await;
+        recompute_skew(
+            &state,
+            previous_state.as_ref(),
+            &ours,
+            &mut skewed,
+            &mut on_skew,
+        );
     }
 
     loop {
@@ -743,16 +808,21 @@ pub async fn watch_label<N: NodeClient>(
             // and check for skew, same as the immediate check above.
             if let Some(old) = previous_id {
                 if *id == old {
-                    check_previous_skew(
+                    refresh_previous_state(
                         node,
                         old,
                         false,
-                        &state,
-                        &ours,
-                        &mut reported_skew,
-                        &mut on_skew,
+                        &mut previous_state,
+                        &mut previous_unreachable,
                     )
-                    .await?;
+                    .await;
+                    recompute_skew(
+                        &state,
+                        previous_state.as_ref(),
+                        &ours,
+                        &mut skewed,
+                        &mut on_skew,
+                    );
                 }
             }
             continue; // a different game on the same connection
@@ -789,6 +859,23 @@ pub async fn watch_label<N: NodeClient>(
             }
             // `UpdateData` is `#[non_exhaustive]`. Ignore what we do not know.
             _ => continue,
+        }
+        // The state that just changed is the CURRENT contract's, which is
+        // exactly what a recovery from skew looks like: the opponent's
+        // records, previously missing here, arrive through this game's own
+        // subscription with no need to re-GET the previous contract at all.
+        // Uses whatever `previous_state` was last cached; a stale cache only
+        // means a recovery is detected one wake later than the freshest
+        // possible answer, never that it is missed permanently, since the
+        // previous contract is re-checked every time it wakes this loop too.
+        if previous_id.is_some() {
+            recompute_skew(
+                &state,
+                previous_state.as_ref(),
+                &ours,
+                &mut skewed,
+                &mut on_skew,
+            );
         }
         let status = project(&state, &g.view.params);
         on_status(&state, &status);

@@ -295,12 +295,21 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                                 });
                             },
                             // Never fatal, never a teardown -- see the doc
-                            // comment on `Wires::skew`. Latched here rather
-                            // than appended to, matching `session.rs`'s own
-                            // `reported_skew` latch: the message is static
-                            // (`SKEW_WARNING`), so there is nothing to
-                            // accumulate.
-                            move |msg: &str| skew_sig.set(Some(msg.to_string())),
+                            // comment on `Wires::skew`. `session::watch_label`
+                            // fires this callback on a TRANSITION only:
+                            // `SKEW_WARNING` when skew is first detected,
+                            // `SKEW_RESOLVED` once the opponent's records
+                            // catch back up. Distinguishing the two by
+                            // identity (not just any non-warning content)
+                            // is what lets the banner clear itself instead
+                            // of asserting a split that has since healed.
+                            move |msg: &str| {
+                                if msg == session::SKEW_RESOLVED {
+                                    skew_sig.set(None);
+                                } else {
+                                    skew_sig.set(Some(msg.to_string()));
+                                }
+                            },
                         )
                         .fuse();
                         futures::pin_mut!(watch_fut);
@@ -493,6 +502,23 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                                 if mismatch.read().as_deref() == Some(label.as_str()) {
                                     mismatch.set(None);
                                 }
+                                // A successful migration moved this game to a
+                                // new contract id, and `GameScreen`'s mount
+                                // effect only re-subscribes when `label`
+                                // changes -- which it does not, on a
+                                // migration. Left alone, the board would
+                                // become a one-shot snapshot that never
+                                // updates again. Re-issue `Watch` ourselves,
+                                // and clear `watch_error` here rather than
+                                // waiting for the watch actor to get around to
+                                // it: it still shows the build-mismatch text
+                                // telling the user to run the migration they
+                                // just successfully ran, and that message
+                                // must not linger for even one render.
+                                watch_error.set(None);
+                                watch_tx.send(Cmd::Watch {
+                                    label: label.clone(),
+                                });
                             }
                             Err(e) if is_build_mismatch(e, &label) => {
                                 mismatch.set(Some(label.clone()));

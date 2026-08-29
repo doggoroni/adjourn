@@ -835,3 +835,76 @@ fn a_current_format_record_passes_through_unchanged() {
     assert_eq!(rec.format, GAME_RECORD_FORMAT);
     assert_eq!(migrate_record(rec.clone()), Some(rec));
 }
+
+/// A real byte-for-byte format-2 payload, decoded through serde rather than
+/// built as a `GameRecord { format: 2, .. }` literal with `previous: None`
+/// set by hand. Every format-2 test above this one constructs a `GameRecord`
+/// value directly -- and a `GameRecord` literal always HAS a `previous`
+/// field, because the Rust type does. None of them can exercise whether the
+/// wire decode actually tolerates a payload that PHYSICALLY LACKS the field,
+/// which is the only shape a real pre-migration secret-store entry can ever
+/// be (format 2 predates the field entirely). That is exactly the case
+/// `#[serde(default)]` on `GameRecord.previous` exists to survive -- see its
+/// doc comment in `delegate_policy.rs` -- and nothing before this test ever
+/// encoded bytes without it.
+///
+/// This struct is `GameRecord`'s v2 shape: identical field names and
+/// `#[serde(rename/with)]` attributes, minus `previous`, so ciborium's
+/// struct-as-map encoding produces exactly what a v2 delegate actually wrote.
+#[derive(serde::Serialize)]
+struct GameRecordFormat2 {
+    #[serde(rename = "v")]
+    format: u8,
+    label: String,
+    params: GameParams,
+    side: Side,
+    #[serde(with = "serde_bytes")]
+    origin: Option<[u8; 32]>,
+    #[serde(with = "serde_bytes")]
+    contract: [u8; 32],
+    entropy: EntropyQuality,
+    last_signed_ply: u16,
+    #[serde(with = "serde_bytes")]
+    last_move_body_hash: [u8; 32],
+}
+
+#[test]
+fn a_format_2_payload_decodes_with_previous_defaulted_to_none() {
+    let (_w, _b, params) = game();
+    let old = GameRecordFormat2 {
+        format: 2,
+        label: "alice".into(),
+        params,
+        side: Side::White,
+        origin: Some([9u8; 32]),
+        contract: [3u8; 32],
+        entropy: EntropyQuality::HostBacked,
+        last_signed_ply: 11,
+        last_move_body_hash: [5u8; 32],
+    };
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&old, &mut bytes).expect("encode a real format-2 payload");
+
+    let rec: GameRecord = ciborium::from_reader(bytes.as_slice())
+        .expect("a format-2 payload lacking `previous` must still decode as GameRecord");
+
+    // Decoding alone does not upgrade the format -- that is `migrate_record`'s
+    // job, exercised separately below.
+    assert_eq!(rec.format, 2);
+    assert_eq!(
+        rec.previous, None,
+        "a payload with no `previous` field must default it to None on decode, \
+         not fail to decode at all"
+    );
+    assert_eq!(
+        rec.last_signed_ply, 11,
+        "the double-sign guard's counter must survive intact through the same decode"
+    );
+    assert_eq!(rec.origin, Some([9u8; 32]), "origin must survive intact");
+
+    let migrated = migrate_record(rec).expect("format 2 must still migrate to the current one");
+    assert_eq!(migrated.format, GAME_RECORD_FORMAT);
+    assert_eq!(migrated.previous, None);
+    assert_eq!(migrated.last_signed_ply, 11);
+}
