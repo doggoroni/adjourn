@@ -24,6 +24,7 @@ use adjourn_cli::ws::WsClient;
 use adjourn_core::delegate_api::{Request, Response, Side};
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand, ValueEnum};
+use freenet_stdlib::prelude::ContractInstanceId;
 use rand::RngCore;
 
 const DEFAULT_NODE: &str = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native";
@@ -125,6 +126,12 @@ enum GameCommand {
     },
     /// List every game this delegate has bound.
     List,
+    /// Move a bound game onto the contract id this build derives, when the
+    /// delegate's recorded id no longer matches.
+    Migrate {
+        #[arg(long)]
+        label: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -303,6 +310,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
             let games = list_games(&mut node).await?;
             output::render_game_list(&games);
+        }
+
+        Command::Game(GameCommand::Migrate { label }) => {
+            let contract_wasm = read_wasm(
+                &cli.contract_wasm,
+                "the contract WASM",
+                "scripts/build-contract.sh",
+            )?;
+            let mut node = connect(&cli.node, &cli.delegate_wasm).await?;
+            match session::migrate_label(&mut node, &label, contract_wasm).await? {
+                session::MigrateOutcome::AlreadyCurrent { contract } => println!(
+                    "{label} is already on contract {} -- nothing to migrate",
+                    ContractInstanceId::new(contract).encode()
+                ),
+                session::MigrateOutcome::Migrated { from, to, records } => {
+                    println!(
+                        "{label}: moved {records} record(s)\n  from {}\n  to   {}",
+                        ContractInstanceId::new(from).encode(),
+                        ContractInstanceId::new(to).encode()
+                    );
+                    println!(
+                        "Your opponent must run the same build. Until they do, \
+                         your moves will not reach them."
+                    );
+                }
+            }
         }
 
         Command::Show { label } => {

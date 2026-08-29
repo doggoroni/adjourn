@@ -34,6 +34,12 @@ pub enum Cmd {
         label: String,
         offer: String,
     },
+    /// Move a bound game onto the contract id this build derives. Sent from
+    /// the game screen when `wires.error` reports a build mismatch for this
+    /// label -- see `session::migrate_label`.
+    Migrate {
+        label: String,
+    },
     Open {
         label: String,
     },
@@ -394,6 +400,10 @@ pub fn use_conn(node_url: Signal<String>) -> Wires {
                                 *b = None;
                             }
                         });
+                    }
+                    Cmd::Migrate { label } => {
+                        session::migrate_label(c, &label, wasm.clone()).await?;
+                        view.set(Some(session::open_game_view(c, &label, wasm).await?));
                     }
                     Cmd::Open { label } => {
                         // Clear the shared view before awaiting the open, not

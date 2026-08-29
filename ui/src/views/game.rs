@@ -34,6 +34,35 @@ pub fn GameScreen(wires: Wires, label: String) -> Element {
         wires.tx.send(Cmd::Watch { label });
     }));
 
+    // `session::open_game`'s `expected_container` refuses to even GET when
+    // this build derives a different contract id than the delegate recorded
+    // for this label -- see `CLAUDE.md`'s "Client" section and
+    // `expected_container`'s doc comment. That refusal lands in `wires.error`
+    // as a message naming this exact label (it spells out the very
+    // `adjourn game migrate --label <label>` command this button sends), so
+    // matching on that text -- rather than showing the button unconditionally
+    // -- is what keeps it hidden for every game that is not actually affected.
+    let build_mismatch =
+        wires.error.read().as_ref().is_some_and(|e| {
+            e.contains("build mismatch") && e.contains(&format!("--label {label}"))
+        });
+    if build_mismatch {
+        return rsx! {
+            section { class: "screen",
+                p { "{label} cannot be opened: this build's contract WASM no longer matches the one this game was bound with." }
+                button {
+                    id: "migrate",
+                    class: "migrate",
+                    onclick: {
+                        let label = label.clone();
+                        move |_| wires.tx.send(Cmd::Migrate { label: label.clone() })
+                    },
+                    "migrate this game"
+                }
+            }
+        };
+    }
+
     // `view` is one signal shared by every bound game. A stale view left over
     // from a different game (or one still in flight after `Cmd::Open` cleared
     // it to `None`) must never render under this screen's label -- treat a

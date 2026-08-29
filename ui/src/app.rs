@@ -68,6 +68,18 @@ pub fn App() -> Element {
                     }
                 }
             }
+            // Not an error: the transport and the watch are both healthy, but
+            // the opponent is still signing moves against the contract this
+            // game migrated away from, so those moves are not reaching this
+            // build. There is nothing to retry here -- the fix is out of
+            // band, on the opponent's side (upgrade) or this one's (go back
+            // to the old build) -- so this gets its own presentation rather
+            // than reusing `.error`'s alarm styling or its retry button.
+            if let Some(msg) = wires.skew.cloned() {
+                div { class: "skew", role: "status",
+                    span { "{msg}" }
+                }
+            }
             if (wires.busy)() {
                 div { class: "busy", "working…" }
             }
