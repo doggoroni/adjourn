@@ -18,7 +18,7 @@
 
 use adjourn_core::delegate_api::{GameSummary, Refusal, Request, Response, Side};
 use adjourn_core::state::Delta;
-use adjourn_core::{legal_moves, project, Body, GameParams, GameState, Status};
+use adjourn_core::{legal_moves, project, Body, GameParams, GameState, KeyBytes, Status};
 use anyhow::{anyhow, bail, Context};
 use freenet_stdlib::prelude::{ContractContainer, ContractInstanceId, UpdateData};
 use shakmaty::Color;
@@ -376,6 +376,11 @@ pub struct GameView {
     pub params: GameParams,
     pub game_id: [u8; 32],
     pub contract: [u8; 32],
+    /// The contract id this game was migrated FROM, if ever. `None` for a
+    /// game that has never migrated. Carried through from `GameSummary` so
+    /// `watch_label` can detect an opponent who never left it -- see
+    /// `opponent_moved_on_previous`.
+    pub previous: Option<[u8; 32]>,
     pub state: GameState,
     pub status: Status,
 }
@@ -411,6 +416,7 @@ async fn open_game<N: NodeClient>(
     let contract = game.contract.expect("bound_game checked this is Some");
     let game_id = game.game_id.expect("bound_game checked this is Some");
     let side = game.side.expect("bound_game checked this is Some");
+    let previous = game.previous;
     let container = expected_container(label, contract_wasm, &params, contract)?;
 
     let state = fetch_state(node, contract).await?;
@@ -423,6 +429,7 @@ async fn open_game<N: NodeClient>(
             params,
             game_id,
             contract,
+            previous,
             state,
             status,
         },
@@ -564,6 +571,34 @@ fn decode_delta_payload(bytes: &[u8]) -> anyhow::Result<Option<Delta>> {
         .map_err(|e| anyhow::anyhow!("an update notification's Delta payload did not decode: {e}"))
 }
 
+/// Printed once by `watch_label` when `opponent_moved_on_previous` fires.
+const SKEW_WARNING: &str = "your opponent is still on the previous contract version -- your \
+     moves are not reaching them. Both players must run the same adjourn-contract build.";
+
+/// Has the opponent moved on the contract we migrated AWAY from?
+///
+/// Deliberately a set difference rather than "are there opponent records on
+/// the old contract" -- the old contract holds the entire pre-migration
+/// history, all of it signed by both players, so that question is always yes
+/// and is not the signal. What matters is a record present there and absent
+/// here, signed by them: that means they moved after we migrated and it has
+/// not come across.
+///
+/// Stateless on purpose: no stored migration ply that can drift out of sync
+/// with what actually got copied. And it must not fire on OUR OWN record
+/// sitting ahead on the old contract -- that is not skew, and reporting it
+/// would cry wolf on every migration.
+pub fn opponent_moved_on_previous(
+    current: &GameState,
+    previous: &GameState,
+    ours: &KeyBytes,
+) -> bool {
+    previous
+        .records
+        .iter()
+        .any(|(id, rec)| rec.signer != *ours && !current.records.contains_key(id))
+}
+
 /// Follow a game, calling `on_status` with the projection after every update.
 ///
 /// Merges each notification into the held state rather than replacing it: the
@@ -621,6 +656,28 @@ pub async fn watch_label<N: NodeClient>(
         }
     }
 
+    // If this game migrated here from an earlier contract id, the opponent
+    // may not have followed -- their moves would land on the OLD id and
+    // never reach this one. Subscribe there too, so this loop wakes on that
+    // as well as on the current contract, and check once immediately for
+    // skew that predates this call. `reported_skew` latches so a lingering
+    // skew is surfaced once rather than on every subsequent wake -- the game
+    // stays watchable either way; this is a report, not a teardown.
+    let ours = g.view.params.key_of(g.view.side.into());
+    let previous_id = g.view.previous;
+    let mut reported_skew = false;
+    if let Some(old) = previous_id {
+        let old_bytes = node.get(ContractInstanceId::new(old), true).await?;
+        if let Some(bytes) = old_bytes.as_deref() {
+            if let Some(previous_state) = decode_state_payload(bytes)? {
+                if opponent_moved_on_previous(&state, &previous_state, &ours) {
+                    eprintln!("{SKEW_WARNING}");
+                    reported_skew = true;
+                }
+            }
+        }
+    }
+
     loop {
         // A real `WsClient` blocks until a notification arrives and can never
         // return `None` (see the `NodeClient::next_update` doc), so `None`
@@ -634,6 +691,21 @@ pub async fn watch_label<N: NodeClient>(
         // `OpenGame.contract` is a raw `[u8; 32]`; `ContractInstanceId` derefs
         // to the same, so compare through the deref rather than by type.
         if *id != g.view.contract {
+            // Not the current contract -- but it may be the one we migrated
+            // away from, which we subscribed to above precisely so a wake
+            // here is possible. Re-GET it (its own notification payload is
+            // not decoded; a one-shot GET is simple and this path is rare)
+            // and check for skew, same as the immediate check above.
+            if !reported_skew && previous_id.is_some_and(|old| *id == old) {
+                if let Some(bytes) = node.get(id, false).await? {
+                    if let Some(previous_state) = decode_state_payload(&bytes)? {
+                        if opponent_moved_on_previous(&state, &previous_state, &ours) {
+                            eprintln!("{SKEW_WARNING}");
+                            reported_skew = true;
+                        }
+                    }
+                }
+            }
             continue; // a different game on the same connection
         }
         // A `State` payload is an encoded `GameState`; a `Delta` payload is an

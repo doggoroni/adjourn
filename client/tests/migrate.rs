@@ -3,9 +3,70 @@ mod common;
 use adjourn_client::fake::{shared_world, FakeNode};
 use adjourn_client::node::NodeClient;
 use adjourn_client::session::{
-    game_bind, invite_accept, invite_new, migrate_label, open_game_view, play_move, MigrateOutcome,
+    game_bind, invite_accept, invite_new, migrate_label, open_game_view,
+    opponent_moved_on_previous, play_move, watch_label, MigrateOutcome,
 };
 use adjourn_core::delegate_api::{Request, Response, Side};
+use adjourn_core::{Body, GameState, KeyBytes, Record};
+use ed25519_dalek::SigningKey;
+
+/// The old contract legitimately holds the whole pre-migration history, so
+/// "the opponent has records there" is ALWAYS true and is not the signal. The
+/// signal is a set difference: records on the old id that are absent from the
+/// new one and were signed by the opponent.
+#[test]
+fn skew_is_a_set_difference_not_the_presence_of_opponent_records() {
+    let (ours, theirs) = fixture_two_keys();
+    let shared = state_with(&[(ours, 1), (theirs, 2)]);
+
+    // Identical sets: migration complete, nothing to report.
+    assert!(!opponent_moved_on_previous(&shared, &shared, &ours));
+
+    // Opponent moved on the OLD contract after we migrated.
+    let old_ahead = state_with(&[(ours, 1), (theirs, 2), (theirs, 4)]);
+    assert!(opponent_moved_on_previous(&shared, &old_ahead, &ours));
+
+    // WE are ahead on the old one. Not skew -- it is our own record, and
+    // reporting it would cry wolf on every migration.
+    let ours_ahead = state_with(&[(ours, 1), (theirs, 2), (ours, 3)]);
+    assert!(!opponent_moved_on_previous(&shared, &ours_ahead, &ours));
+}
+
+/// Two distinct public keys, playing the role of "us" and "the opponent" in
+/// `opponent_moved_on_previous`'s tests. Follows `common/tests/adversarial.rs`'s
+/// `keys()` fixture style -- fixed seed bytes, derived verifying keys -- but
+/// hands back raw `KeyBytes` since the predicate under test never verifies a
+/// signature, only compares signer bytes.
+fn fixture_two_keys() -> (KeyBytes, KeyBytes) {
+    let ours = SigningKey::from_bytes(&[11u8; 32]);
+    let theirs = SigningKey::from_bytes(&[22u8; 32]);
+    (
+        ours.verifying_key().to_bytes(),
+        theirs.verifying_key().to_bytes(),
+    )
+}
+
+/// A `GameState` holding one unsigned `Move` record per `(signer, ply)` pair,
+/// inserted via `absorb_for_test` -- no signature verification, no chain, no
+/// eviction. `opponent_moved_on_previous` is a pure set difference over
+/// `state.records`, so none of that machinery is needed to exercise it: only
+/// distinct record ids (one per ply here) and the `signer` field matter.
+fn state_with(entries: &[(KeyBytes, u16)]) -> GameState {
+    let mut state = GameState::empty();
+    for (signer, ply) in entries {
+        let rec = Record {
+            body: Body::Move {
+                ply: *ply,
+                parent: [0u8; 32],
+                uci: "e2e4".to_string(),
+            },
+            signer: *signer,
+            sig: vec![0u8; 64],
+        };
+        state.absorb_for_test(&rec);
+    }
+    state
+}
 
 /// Pins the PUT-before-Rebind ordering. `FakeNode`'s `put` and `delegate`
 /// both otherwise succeed unconditionally, so nothing else in this file (or
@@ -153,6 +214,63 @@ async fn migrating_twice_is_a_no_op_the_second_time() {
         matches!(second, MigrateOutcome::AlreadyCurrent { .. }),
         "a second migrate must be a no-op, got {second:?}"
     );
+}
+
+/// Bob migrates; alice never does and keeps playing on the OLD contract.
+/// `watch_label` must still run to completion (not panic, not hang, not
+/// error) and must not stop reflecting bob's own (new-contract) game just
+/// because the opponent is stuck behind -- the game stays watchable, and the
+/// skew is reported (via `eprintln!`, not observable from here) rather than
+/// torn down. This test cannot see the printed warning; it pins the
+/// behaviour around it: the watch survives the skew and still reports the
+/// correct position on the contract bob actually migrated to.
+#[tokio::test]
+async fn watch_label_survives_skew_against_an_unmigrated_opponent() {
+    let Some((mut alice, mut bob, wasm)) = setup().await else {
+        return eprintln!("skipping: run ./scripts/build-contract.sh first");
+    };
+    let mut variant = wasm.clone();
+    variant.push(0);
+    variant.push(0);
+    variant.extend_from_slice(b"variant");
+
+    // Two moves on the OLD contract, shared by both players before anyone
+    // migrates.
+    play_move(&mut alice, "alice", "e2e4", wasm.clone())
+        .await
+        .unwrap();
+    play_move(&mut bob, "bob", "e7e5", wasm.clone())
+        .await
+        .unwrap();
+
+    migrate_label(&mut bob, "bob", variant.clone())
+        .await
+        .unwrap();
+
+    // Alice never migrated -- her label is still bound to the OLD contract.
+    // She keeps playing there (it is legitimately her turn, ply 3), and bob
+    // -- now over on the new contract -- will never see this move.
+    play_move(&mut alice, "alice", "g1f3", wasm.clone())
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    watch_label(&mut bob, "bob", variant.clone(), |_state, status| {
+        seen.push(status.ply);
+    })
+    .await
+    .expect("a lagging opponent must not turn watch_label into an error");
+
+    assert_eq!(
+        seen,
+        vec![2],
+        "bob's own contract only ever saw the first two moves"
+    );
+
+    // The game is still fully readable afterward -- skew is a report, not a
+    // teardown.
+    let after = open_game_view(&mut bob, "bob", variant).await.unwrap();
+    assert_eq!(after.status.ply, 2);
 }
 
 const ALICE_ENTROPY: [u8; 32] = [0xa1; 32];
